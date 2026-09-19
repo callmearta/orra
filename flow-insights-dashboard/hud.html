@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<!-- This exact title is load-bearing: hypr::place_hud() finds the overlay by
+     matching "Orra HUD", and so does the Hyprland window rule it writes. -->
+<title>Orra HUD</title>
+<style>
+  :root {
+    --teal: #264e4c;
+    --teal-mid: #4e8781;
+    --done: #10b981;
+    --edge: rgba(24, 24, 27, 0.12);
+  }
+
+  /* The window is much larger than the pill — the toolkit will not make a
+     webview window any smaller — so the pill is centred here and everything
+     around it stays transparent. The window itself is click-through, so the
+     slack never intercepts a click. */
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  .pill {
+    box-sizing: border-box;
+    width: 100px;
+    height: 24px;
+    /* Wider at the sides than top and bottom, on purpose: the vertical gap is
+       what the wave grows into, so trading it for horizontal breathing room
+       would make the thing the pill exists to show smaller. The wave stretches
+       to fill whatever width is left, so these two numbers set the side gaps. */
+    padding: 3px 8px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    background: #ffffff;
+    border: 1px solid var(--edge);
+    border-radius: 999px;
+  }
+
+  .wave {
+    /* Fills the space so the side gaps are set by the padding, not by the bar
+       count. The bars themselves are spaced evenly across it. */
+    flex: 1 1 auto;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .wave i {
+    display: block;
+    /* Bold enough to read as a waveform rather than a barcode: ten of these
+       span the width with an even gap between each. */
+    width: 4px;
+    height: 5px;
+    border-radius: 2px;
+    background: linear-gradient(180deg, var(--teal), var(--teal-mid));
+    transition: height 70ms linear;
+  }
+
+  /* The only status indicator: the colour says which phase we are in. */
+  .dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--teal);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  .pill[data-phase="processing"] .dot { animation: none; background: var(--teal-mid); }
+  .pill[data-phase="idle"] .dot { animation: none; background: var(--done); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%      { opacity: 0.3; transform: scale(0.8); }
+  }
+</style>
+</head>
+<body>
+  <div class="pill" id="pill" data-phase="recording">
+    <div class="wave" id="wave"></div>
+    <span class="dot"></span>
+  </div>
+
+<script>
+const { listen } = window.__TAURI__.event;
+
+// Ten bars is what fills the pill's width at a readable thickness; the wave
+// spreads them evenly, so this only changes how chunky they are.
+const BARS = 10;
+const wave = document.getElementById('wave');
+const bars = Array.from({ length: BARS }, () => {
+  const el = document.createElement('i');
+  wave.appendChild(el);
+  return el;
+});
+
+const pill = document.getElementById('pill');
+
+let smoothed = 0;
+
+/**
+ * Bars mirror the live mic level.
+ *
+ * The level is a peak amplitude, so ordinary speech sits well below 1 and quiet
+ * speech is down around 0.02–0.05. A square root is the cheap way to make that
+ * audible on screen: it lifts small values hard while compressing loud ones, so
+ * a low tone still moves the bars instead of barely nudging them. The curve is
+ * applied before the smoothing, so a quiet syllable registers immediately rather
+ * than being averaged away.
+ */
+function paint(level) {
+  const target = Math.min(1, Math.sqrt(Math.max(0, level)) * 2.2);
+  smoothed = smoothed * 0.55 + target * 0.45;
+  bars.forEach((bar, i) => {
+    // A gentle bell across the bars keeps it reading as a waveform, not a bar chart.
+    // A shallow bell keeps the edges lively instead of nearly still.
+    const shape = 0.6 + 0.4 * Math.sin((Math.PI * (i + 0.5)) / BARS);
+    // 5px at rest, up to the full 16px the pill leaves for the wave.
+    bar.style.height = (5 + smoothed * 11 * shape).toFixed(1) + 'px';
+  });
+}
+
+listen('mic-level', (event) => paint(Math.max(0, Math.min(1, event.payload || 0))));
+
+listen('state', (event) => {
+  const phase = typeof event.payload === 'string' ? event.payload : 'recording';
+  pill.dataset.phase = phase;
+  if (phase === 'recording') {
+    // A fresh dictation starts from a flat line rather than the last one's level.
+    smoothed = 0;
+    paint(0);
+  }
+});
+
+paint(0);
+</script>
+</body>
+</html>

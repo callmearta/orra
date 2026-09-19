@@ -1,0 +1,63 @@
+[package]
+name = "orra"
+version = "0.1.0"
+edition = "2024"
+# Two binaries are declared below, so `cargo run` needs to be told which one is
+# the app; the Tauri CLI shells out to a bare `cargo run`.
+default-run = "orra"
+
+# Both binaries are named explicitly: declaring any [[bin]] disables
+# auto-discovery, and `src/bin/ctl.rs` would otherwise build as plain `ctl`
+# rather than the `orra-ctl` the Hyprland bind invokes.
+[[bin]]
+name = "orra"
+path = "src/main.rs"
+
+[[bin]]
+name = "orra-ctl"
+path = "src/bin/ctl.rs"
+
+[features]
+# Tauri decides at compile time whether a build talks to the CLI's dev server or
+# to the assets embedded in the binary, and it decides on this feature. Without
+# it, *every* plain `cargo build`/`cargo run` — debug or release — bakes in
+# `http://127.0.0.1:1430/../ui`, the URL of `tauri dev`'s static server, and dies
+# with a 404 the moment that server is not the one running.
+#
+# On by default so the binary from `cargo run`, `cargo build --release` and the
+# autostart entry is self-contained. The CLI strips it back out for `tauri dev`,
+# which is the one case where the dev server is what we want.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[dependencies]
+anyhow = "1.0.104"
+# Gemini's live socket carries its audio as base64 inside JSON. Already in the
+# tree transitively, so this adds no build.
+base64 = "0.22.1"
+# Local calendar days for the Insights aggregates: streaks and the
+# month-over-month comparison are defined on the user's own days, and std has no
+# local-time conversion. Already in the tree transitively, so this adds no build.
+chrono = "0.4.45"
+cpal = "0.18.2"
+futures-util = "0.3.34"
+rodio = "0.22.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tauri = { version = "2.11.5", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2.3.2"
+tauri-plugin-opener = "2.5.5"
+tauri-plugin-single-instance = "2.4.4"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+ureq = { version = "3.4.2", features = ["json"] }
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[lints.clippy]
+# `if let` chains read badly once there are more than two of them, and most
+# collapsible sites here are a platform check wrapping a capability probe,
+# where the nesting is what says "this whole group is one condition". The
+# suggested rewrite is a stack of `&& let` lines that is harder to follow.
+collapsible_if = "allow"

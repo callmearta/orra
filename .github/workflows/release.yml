@@ -1,0 +1,147 @@
+name: Release
+
+# Cut a release by pushing a tag that matches the version in
+# src-tauri/tauri.conf.json:
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# Every platform builds into the same GitHub Release. The workflow can also be
+# run by hand from the Actions tab to check the build without tagging — that
+# run uploads downloadable artifacts but publishes nothing.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+# Two tags pushed at once should not race each other into the same release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.platform }}
+    permissions:
+      # tauri-action creates and uploads to the GitHub Release.
+      contents: write
+    strategy:
+      # One platform failing must not cancel the other, or a Windows-only
+      # problem would silently cost us the Linux bundles too.
+      fail-fast: false
+      matrix:
+        include:
+          - label: Linux — AppImage, deb, rpm
+            platform: ubuntu-22.04
+            bundles: appimage,deb,rpm
+          - label: Windows — NSIS installer
+            platform: windows-latest
+            bundles: nsis
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: flow-insights-dashboard/package-lock.json
+
+      # A tag that disagrees with the app version produces installers whose
+      # internal version contradicts the release they sit under. Cheap to
+      # catch here, painful to notice later.
+      - name: Check the tag matches the app version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          echo "tag=$tag  tauri.conf.json=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the app version $version — bump src-tauri/tauri.conf.json, Cargo.toml and package.json, or retag."
+            exit 1
+          fi
+
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: flow-insights-dashboard
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # WebKitGTK and the Tauri toolchain; patchelf and libfuse2 are for
+      # AppImage, and rpm for the RPM bundle.
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            build-essential \
+            patchelf \
+            libfuse2 \
+            rpm \
+            curl \
+            wget \
+            file
+
+      # Tagged build: build and publish to the Release for this tag.
+      - name: Build and publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --bundles ${{ matrix.bundles }}
+          tagName: ${{ github.ref_name }}
+          releaseName: Orra ${{ github.ref_name }}
+          releaseDraft: false
+          prerelease: false
+          releaseBody: |
+            Hold a key, speak, let go — the words are typed into whatever window
+            has focus.
+
+            **Linux**
+            - `.AppImage` — runs on any distro: `chmod +x Orra_*.AppImage && ./Orra_*.AppImage`
+            - `.deb` — Debian, Ubuntu: `sudo apt install ./orra_*.deb`
+            - `.rpm` — Fedora, RHEL: `sudo dnf install ./orra-*.rpm`
+
+            The deb and rpm declare `wtype` and `wl-clipboard` as dependencies.
+            On an X11 session you want `xdotool` instead of `wtype`.
+
+            **Windows** — run the `-setup.exe` installer.
+
+            Orra needs an API key for one of Deepgram, AssemblyAI or Gemini; see
+            the [README](https://github.com/callmearta/orra#api-keys).
+
+      # Untagged run (workflow_dispatch): same build, no release.
+      - name: Build only
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: --bundles ${{ matrix.bundles }}
+
+      # Keeps a manual run useful, and gives every run its bundles as
+      # downloadable artifacts even if publishing failed.
+      - name: Upload bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: orra-${{ matrix.platform }}
+          retention-days: 14
+          if-no-files-found: ignore
+          path: |
+            src-tauri/target/release/bundle/appimage/*.AppImage
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/nsis/*.exe

@@ -1,0 +1,82 @@
+@import "tailwindcss" source(".");
+
+/* The two HTML entry points sit above src/, so they are outside the scan root
+   above and are named explicitly. Pinning the sources matters here: this repo is
+   not a git repository, so Tailwind has no .gitignore to filter with, and an
+   automatic scan would root itself at whatever directory the build ran from —
+   walking src-tauri/target/ (hundreds of MB) or silently missing src/. */
+@source "../index.html";
+@source "../hud.html";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Copied from the hexes the components already use, so new markup can say
+   `bg-card` / `text-ink` instead of repeating arbitrary values. The dark
+   overrides below re-point the same variables, so a token themes itself. */
+@theme {
+  --font-sans: "Plus Jakarta Sans Variable", ui-sans-serif, system-ui, sans-serif;
+
+  --color-canvas: #eceef0;
+  --color-sheet: #ffffff;
+  --color-card: #f4f4f2;
+  --color-ink: #18181b;
+  --color-muted: #52525b;
+  --color-hair: #dededb;
+  --color-teal: #264e4c;
+  --color-teal-mid: #4e8781;
+  --color-teal-soft: #74aba4;
+  --color-teal-pale: #c6e3df;
+  --color-good: #d7f4e5;
+  --color-good-ink: #14532d;
+}
+
+.dark {
+  --color-canvas: #121417;
+  --color-sheet: #1a1d22;
+  --color-card: #23262b;
+  --color-ink: #f4f4f5;
+  --color-muted: #a1a1aa;
+  --color-hair: #383c44;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Sidebar waveform logo.
+
+   The mark is four bars of deliberately uneven height, so scaling each by the
+   same factor keeps the waveform silhouette intact while it breathes. Negative
+   delays rather than positive ones: a positive delay leaves every bar sitting
+   at its resting height for the first cycle, which reads as a stutter on load.
+   Starting each part-way through the cycle makes the wave already in motion. */
+:root {
+  --wave-dur: 1100ms;
+  --wave-stagger: 110ms;
+  --wave-scale-min: 0.5;
+  --wave-ease: ease-in-out;
+}
+
+.t-wave > * {
+  transform-origin: center;
+  animation: t-wave var(--wave-dur) var(--wave-ease) infinite;
+  will-change: transform;
+}
+.t-wave > *:nth-child(2) { animation-delay: calc(var(--wave-stagger) * -1); }
+.t-wave > *:nth-child(3) { animation-delay: calc(var(--wave-stagger) * -2); }
+.t-wave > *:nth-child(4) { animation-delay: calc(var(--wave-stagger) * -3); }
+
+@keyframes t-wave {
+  0%, 100% { transform: scaleY(var(--wave-scale-min)); }
+  50%      { transform: scaleY(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t-wave > * { animation: none !important; }
+}

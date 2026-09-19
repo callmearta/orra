@@ -1,0 +1,414 @@
+//! Hyprland integration.
+//!
+//! Wayland has no global-shortcut protocol, so the push-to-talk bind has to be
+//! registered by the compositor. This writes a managed block into the user's Lua
+//! config and reloads Hyprland — the block is delimited so re-applying it never
+//! duplicates or tramples hand-written binds.
+
+use std::path::{Path, PathBuf};
+
+use anyhow::{Context, Result};
+
+use crate::config::{self, Config, Mode, Provider};
+
+const BEGIN: &str = "-- >>> orra (managed block - edits are overwritten) >>>";
+const END: &str = "-- <<< orra <<<";
+
+fn keybinds_path() -> PathBuf {
+    config::hypr_lua_dir().join("keybinds.lua")
+}
+
+fn settings_path() -> PathBuf {
+    config::hypr_lua_dir().join("settings.lua")
+}
+
+/// Absolute path to the control binary, so the bind does not depend on PATH.
+pub fn ctl_path() -> PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("orra-ctl")))
+        .unwrap_or_else(|| PathBuf::from("orra-ctl"))
+}
+
+/// Quote a value for a Lua string literal.
+///
+/// The hotkeys come from the settings screen as free text and are written
+/// straight into the user's config, so a stray quote or backslash would not
+/// just produce a broken bind — it would end the string and put the rest of the
+/// line into the file as code. Escaping keeps whatever was typed inside the
+/// literal, where a bad key is then a bind Hyprland rejects rather than Lua it
+/// tries to run.
+fn lua_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn keybind_block(cfg: &Config) -> String {
+    let ctl = ctl_path().display().to_string();
+    // A full `exec_cmd` argument: the quoted path plus the command word.
+    fn exec(ctl: &str, args: &str) -> String {
+        lua_string(&format!("{ctl} {args}"))
+    }
+
+    let key = lua_string(cfg.hotkey.trim());
+    let dictate = match cfg.mode {
+        Mode::Hold => format!(
+            r#"hl.bind({key}, hl.dsp.exec_cmd({}), {{ description = "orra: dictate (hold)" }})
+hl.bind({key}, hl.dsp.exec_cmd({}), {{ release = true, description = "orra: dictate (release)" }})"#,
+            exec(&ctl, "start"),
+            exec(&ctl, "stop"),
+        ),
+        Mode::Toggle => format!(
+            r#"hl.bind({key}, hl.dsp.exec_cmd({}), {{ description = "orra: dictate (toggle)" }})"#,
+            exec(&ctl, "toggle"),
+        ),
+    };
+
+    let mut out = dictate;
+
+    // The translating key: the same recording, translated before it is typed.
+    let translate = cfg.translate_hotkey.trim();
+    if !translate.is_empty() && translate != cfg.hotkey.trim() {
+        let translate_key = lua_string(translate);
+        out.push('\n');
+        out.push_str(&match cfg.mode {
+            Mode::Hold => format!(
+                r#"hl.bind({translate_key}, hl.dsp.exec_cmd({}), {{ description = "orra: dictate and translate (hold)" }})
+hl.bind({translate_key}, hl.dsp.exec_cmd({}), {{ release = true, description = "orra: translate (release)" }})"#,
+                exec(&ctl, "translate"),
+                exec(&ctl, "stop"),
+            ),
+            Mode::Toggle => format!(
+                r#"hl.bind({translate_key}, hl.dsp.exec_cmd({}), {{ description = "orra: dictate and translate (toggle)" }})"#,
+                exec(&ctl, "translate"),
+            ),
+        });
+    }
+
+    // Only bind a second key when there is something to switch between, and
+    // only for the provider that has languages to switch: the others detect
+    // one, or pick it with their model, and would do nothing with this key.
+    let lang = cfg.language_hotkey.trim();
+    if cfg.provider == Provider::Deepgram && !lang.is_empty() && cfg.language_cycle.len() > 1 {
+        out.push('\n');
+        out.push_str(&format!(
+            r#"hl.bind({}, hl.dsp.exec_cmd({}), {{ description = "orra: next dictation language" }})"#,
+            lua_string(lang),
+            exec(&ctl, "lang-next"),
+        ));
+    }
+    out
+}
+
+/// How far the pill floats above the bottom edge of the monitor, in pixels.
+const HUD_BOTTOM_MARGIN: i64 = 120;
+
+/// The pill's own height, as drawn by hud.html. The window around it is much
+/// bigger (the toolkit will not make a webview window smaller), so the window
+/// has to be lifted by the difference to put the pill where this margin says.
+const HUD_PILL_H: i64 = 24;
+
+/// Floating, pinned, never-focused overlay, positioned by the compositor.
+///
+/// `no_focus` matters for correctness, not just looks: if the HUD could take
+/// focus it would steal the paste target out from under a dictation.
+///
+/// `move` is an expression the compositor evaluates as the window opens, so the
+/// overlay is *born* in place rather than appearing centred and then jumping.
+///
+/// Every term is one of Hyprland's own variables, evaluated in Hyprland's own
+/// coordinate space, which is what makes this portable: the app never converts
+/// between screen and window coordinates itself. `hyprctl monitors` reports
+/// *physical* pixels while window geometry is in *logical* pixels, so arithmetic
+/// mixing the two is right on an unscaled display and wrong on a scaled one —
+/// the kind of bug that only shows up on someone else's machine.
+///
+/// The variables are monitor-local, so this centres the overlay on whichever
+/// monitor it lands on, at whatever resolution and aspect ratio that monitor has.
+/// `lift` is how far the *window* has to sit above the monitor's bottom edge for
+/// the pill drawn inside it to clear `HUD_BOTTOM_MARGIN`: the margin plus half the
+/// pill, plus half the window (the `window_h/2` term).
+fn hud_rule_block() -> String {
+    let lift = HUD_BOTTOM_MARGIN + HUD_PILL_H / 2;
+    format!(
+        r#"hl.window_rule({{
+  name = "orra-hud",
+  match = {{ title = "^(Orra HUD)$" }},
+  move = {{ "(monitor_w/2-window_w/2)", "(monitor_h-{lift}-window_h/2)" }},
+  float = true,
+  pin = true,
+  no_focus = true,
+  no_anim = true,
+  no_blur = true,
+  no_shadow = true,
+  no_dim = true,
+  border_size = 0,
+  rounding = 0,
+}})"#
+    )
+}
+
+/// Register (or refresh) the bind and HUD rule, then reload Hyprland.
+pub fn apply(cfg: &Config) -> Result<String> {
+    if !config::is_hyprland() {
+        return Ok("Not running under Hyprland — using the global shortcut plugin instead.".into());
+    }
+
+    write_block(&keybinds_path(), &keybind_block(cfg))?;
+    if cfg.hud {
+        write_block(&settings_path(), &hud_rule_block())?;
+    } else {
+        remove_block_file(&settings_path())?;
+    }
+
+    reload()?;
+
+    // Surface parse errors instead of letting the user discover them later.
+    let errs = hyprctl(&["configerrors"])?;
+    let errs = errs.trim();
+    if !errs.is_empty() && errs != "no errors" {
+        return Ok(format!("Applied, but Hyprland reported config errors: {errs}"));
+    }
+    Ok(format!("Bound to {} in keybinds.lua", cfg.hotkey.trim()))
+}
+
+fn reload() -> Result<()> {
+    hyprctl(&["reload"]).map(|_| ())
+}
+
+fn hyprctl(args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new("hyprctl")
+        .args(args)
+        .output()
+        .context("running hyprctl")?;
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+// ---------------------------------------------------------------------------
+// managed blocks
+// ---------------------------------------------------------------------------
+
+fn remove_block(body: &str) -> String {
+    let Some(start) = body.find(BEGIN) else { return body.to_string() };
+    let Some(rel_end) = body[start..].find(END) else {
+        // Unterminated block (hand-edited or truncated) — drop to end of file.
+        return body[..start].to_string();
+    };
+    let end = start + rel_end + END.len();
+    // Also swallow the newline that followed the closing marker.
+    let end = body[end..].find('\n').map(|i| end + i + 1).unwrap_or(body.len());
+    format!("{}{}", &body[..start], &body[end..])
+}
+
+fn write_block(path: &Path, block: &str) -> Result<()> {
+    let original = std::fs::read_to_string(path).unwrap_or_default();
+    let stripped = remove_block(&original);
+    let mut next = stripped.trim_end().to_string();
+    if !next.is_empty() {
+        next.push_str("\n\n");
+    }
+    next.push_str(BEGIN);
+    next.push('\n');
+    next.push_str(block.trim_end());
+    next.push('\n');
+    next.push_str(END);
+    next.push('\n');
+    write_with_backup(path, &next)
+}
+
+fn remove_block_file(path: &Path) -> Result<()> {
+    let Ok(original) = std::fs::read_to_string(path) else { return Ok(()) };
+    if !original.contains(BEGIN) {
+        return Ok(());
+    }
+    let next = remove_block(&original);
+    write_with_backup(path, &next)
+}
+
+/// Back up once (never overwriting an older backup) before the first edit.
+fn write_with_backup(path: &Path, content: &str) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    if path.exists() {
+        let bak = path.with_extension("lua.orra.bak");
+        if !bak.exists() {
+            std::fs::copy(path, &bak)
+                .with_context(|| format!("backing up {}", path.display()))?;
+        }
+    }
+    std::fs::write(path, content).with_context(|| format!("writing {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    // Setup mutates a couple of fields on `Config::default()`. Naming all forty
+    // fields to satisfy the lint would bury what each test is actually varying.
+    #![allow(clippy::field_reassign_with_default)]
+
+    use super::*;
+
+    #[test]
+    fn block_is_appended_once_and_replaced_on_reapply() {
+        let dir = std::env::temp_dir().join(format!("orra_hypr_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("keybinds.lua");
+        std::fs::write(&f, "hl.bind(\"SUPER + Q\", close)\n").unwrap();
+
+        write_block(&f, "FIRST").unwrap();
+        let once = std::fs::read_to_string(&f).unwrap();
+        assert!(once.contains("FIRST"));
+        assert!(once.starts_with("hl.bind(\"SUPER + Q\", close)"));
+
+        write_block(&f, "SECOND").unwrap();
+        let twice = std::fs::read_to_string(&f).unwrap();
+        assert!(twice.contains("SECOND"));
+        assert!(!twice.contains("FIRST"), "old block must be replaced, not stacked");
+        assert_eq!(twice.matches(BEGIN).count(), 1);
+        // The user's own bind survives untouched.
+        assert!(twice.contains("SUPER + Q"));
+
+        remove_block_file(&f).unwrap();
+        let gone = std::fs::read_to_string(&f).unwrap();
+        assert!(!gone.contains(BEGIN));
+        assert!(gone.contains("SUPER + Q"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn binds(cfg: &Config) -> Vec<String> {
+        keybind_block(cfg)
+            .lines()
+            .filter(|l| l.starts_with("hl.bind("))
+            .map(|l| l.to_string())
+            .collect()
+    }
+
+    /// The binds for one job, so a test can count them without the others
+    /// getting in the way.
+    fn binds_for(cfg: &Config, job: &str) -> Vec<String> {
+        binds(cfg).into_iter().filter(|l| l.contains(job)).collect()
+    }
+
+    #[test]
+    fn hold_mode_writes_a_press_and_a_release_bind() {
+        let mut cfg = Config::default();
+        cfg.mode = Mode::Hold;
+        cfg.hotkey = "SUPER + ALT + D".into();
+        cfg.translate_hotkey = "SUPER + ALT + T".into();
+
+        let dictate = binds_for(&cfg, "orra-ctl start");
+        assert_eq!(dictate.len(), 1);
+        assert!(dictate[0].contains("\"SUPER + ALT + D\""));
+        let release = binds_for(&cfg, "release = true");
+        // One release bind per held key: dictating and translating.
+        assert_eq!(release.len(), 2);
+        assert!(release.iter().all(|l| l.contains("orra-ctl stop")));
+    }
+
+    #[test]
+    fn toggle_mode_writes_exactly_one_bind_per_key() {
+        let mut cfg = Config::default();
+        cfg.mode = Mode::Toggle;
+        cfg.hotkey = "SUPER + ALT + D".into();
+        cfg.translate_hotkey = "SUPER + ALT + T".into();
+
+        // No release binds at all when a tap does the toggling.
+        assert!(binds_for(&cfg, "release = true").is_empty());
+        assert_eq!(binds_for(&cfg, "orra-ctl toggle").len(), 1);
+        assert_eq!(binds_for(&cfg, "orra-ctl translate").len(), 1);
+    }
+
+    #[test]
+    fn the_translating_key_gets_its_own_bind() {
+        let mut cfg = Config::default();
+        cfg.hotkey = "SUPER + ALT + D".into();
+        cfg.translate_hotkey = "SUPER + ALT + T".into();
+
+        let translate = binds_for(&cfg, "orra-ctl translate");
+        assert_eq!(translate.len(), 1);
+        assert!(translate[0].contains("\"SUPER + ALT + T\""));
+    }
+
+    #[test]
+    fn no_translate_bind_without_a_key_of_its_own() {
+        let mut cfg = Config::default();
+        cfg.hotkey = "SUPER + ALT + D".into();
+
+        // Empty means the feature is off...
+        cfg.translate_hotkey = "  ".into();
+        assert!(binds_for(&cfg, "orra-ctl translate").is_empty());
+
+        // ...and the same key twice would only fight with itself.
+        cfg.translate_hotkey = "SUPER + ALT + D".into();
+        assert!(binds_for(&cfg, "orra-ctl translate").is_empty());
+    }
+
+    #[test]
+    fn the_language_key_gets_its_own_bind() {
+        let mut cfg = Config::default();
+        cfg.translate_hotkey = String::new();
+        cfg.language_hotkey = "SUPER + ALT + L".into();
+        let lang: Vec<String> = binds(&cfg)
+            .into_iter()
+            .filter(|l| l.contains("lang-next"))
+            .collect();
+        assert_eq!(lang.len(), 1);
+        assert!(lang[0].contains("\"SUPER + ALT + L\""));
+    }
+
+    #[test]
+    fn no_language_bind_when_there_is_nothing_to_cycle() {
+        let mut cfg = Config::default();
+        cfg.language_cycle = vec!["en".into()];
+        assert!(!keybind_block(&cfg).contains("lang-next"));
+
+        // A key that cannot be pressed is as good as no key at all.
+        cfg.language_cycle = vec!["en".into(), "fa".into()];
+        cfg.language_hotkey = "   ".into();
+        assert!(!keybind_block(&cfg).contains("lang-next"));
+    }
+
+    #[test]
+    fn a_quote_in_a_hotkey_cannot_break_out_of_its_string() {
+        // The key is free text from the settings screen. Unescaped, the quotes
+        // here would close the literal early and leave the rest of the line to
+        // be read as Lua.
+        let mut cfg = Config::default();
+        cfg.hotkey = r#"SUPER + " .. os.execute("x") .. ""#.into();
+        cfg.translate_hotkey = String::new();
+
+        let block = keybind_block(&cfg);
+        // Every bind carries the key as one properly escaped literal.
+        assert!(
+            block.contains(&format!("hl.bind({},", lua_string(cfg.hotkey.trim()))),
+            "the key was not interpolated as an escaped literal:\n{block}"
+        );
+        // ...and the raw form, which would end the literal early, is gone.
+        assert!(
+            !block.contains(&format!("hl.bind(\"{}\",", cfg.hotkey.trim())),
+            "an unescaped key literal survived:\n{block}"
+        );
+    }
+
+    #[test]
+    fn lua_string_escapes_the_characters_that_matter() {
+        assert_eq!(lua_string("SUPER + ALT + D"), r#""SUPER + ALT + D""#);
+        assert_eq!(lua_string(r#"a"b"#), r#""a\"b""#);
+        assert_eq!(lua_string(r"a\b"), r#""a\\b""#);
+        assert_eq!(lua_string("a\nb"), r#""a\nb""#);
+    }
+}

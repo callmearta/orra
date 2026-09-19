@@ -1,0 +1,52 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Orra",
+  "version": "0.1.0",
+  "identifier": "ai.orra.desktop",
+  "build": {
+    "beforeDevCommand": { "script": "npm run dev", "cwd": "../flow-insights-dashboard" },
+    "beforeBuildCommand": { "script": "npm run build", "cwd": "../flow-insights-dashboard" },
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../flow-insights-dashboard/dist"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Orra",
+        "width": 1120,
+        "height": 960,
+        "minWidth": 1024,
+        "minHeight": 900,
+        "center": true,
+        "resizable": true,
+        "decorations": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb"],
+    "category": "Productivity",
+    "shortDescription": "Voice dictation for your whole desktop",
+    "longDescription": "Hold a key, speak, and Orra types it into whatever window has focus. Streaming speech-to-text and text-to-speech powered by Deepgram.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/256x256.png",
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "linux": {
+      "deb": {
+        "depends": ["wtype", "wl-clipboard"]
+      }
+    }
+  }
+}
