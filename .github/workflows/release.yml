@@ -27,6 +27,15 @@ jobs:
     permissions:
       # tauri-action creates and uploads to the GitHub Release.
       contents: write
+    env:
+      # linuxdeploy ships its own binutils, and that `strip` predates the
+      # `.relr.dyn` ELF section modern distros emit. It fails on every system
+      # library it is handed — "unknown type [0x13] section `.relr.dyn'" — and
+      # linuxdeploy then exits non-zero, which Tauri reports only as the
+      # unhelpful "failed to run linuxdeploy". Skipping the strip costs some
+      # AppImage size and is the difference between a bundle and no bundle.
+      # Harmless on Windows, where it is ignored.
+      NO_STRIP: 1
     strategy:
       # One platform failing must not cancel the other, or a Windows-only
       # problem would silently cost us the Linux bundles too.
@@ -112,8 +121,8 @@ jobs:
 
             **Linux**
             - `.AppImage` — runs on any distro: `chmod +x Orra_*.AppImage && ./Orra_*.AppImage`
-            - `.deb` — Debian, Ubuntu: `sudo apt install ./orra_*.deb`
-            - `.rpm` — Fedora, RHEL: `sudo dnf install ./orra-*.rpm`
+            - `.deb` — Debian, Ubuntu: `sudo apt install ./Orra_*.deb`
+            - `.rpm` — Fedora, RHEL: `sudo dnf install ./Orra-*.rpm`
 
             The deb and rpm declare `wtype` and `wl-clipboard` as dependencies.
             On an X11 session you want `xdotool` instead of `wtype`.

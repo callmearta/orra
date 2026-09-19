@@ -68,13 +68,13 @@ and rpm, and a Windows installer. Grab the one for your system from
 **Debian / Ubuntu**
 
 ```bash
-sudo apt install ./orra_0.1.0_amd64.deb
+sudo apt install ./Orra_0.1.0_amd64.deb
 ```
 
 **Fedora / RHEL**
 
 ```bash
-sudo dnf install ./orra-0.1.0-1.x86_64.rpm
+sudo dnf install ./Orra-0.1.0-1.x86_64.rpm
 ```
 
 **Any Linux, no install**
