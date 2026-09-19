@@ -326,9 +326,13 @@ sudo pacman -S webkit2gtk-4.1 base-devel wtype wl-clipboard
 
 # Debian / Ubuntu
 sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
-  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+  libxdo-dev libssl-dev libasound2-dev libayatana-appindicator3-dev librsvg2-dev \
   wtype wl-clipboard
 ```
+
+`libasound2-dev` is the one people miss: `cpal` links ALSA to capture the
+microphone, and without it the build fails in `alsa-sys` with
+`Package alsa was not found in the pkg-config search path`.
 
 For an X11 session, swap `wtype` for `xdotool`. For Wayland compositors that do
 not expose the virtual-keyboard protocol `wtype` needs, `ydotool` is used as a

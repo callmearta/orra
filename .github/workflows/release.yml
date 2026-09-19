@@ -85,6 +85,10 @@ jobs:
 
       # WebKitGTK and the Tauri toolchain; patchelf and libfuse2 are for
       # AppImage, and rpm for the RPM bundle.
+      #
+      # libasound2-dev is the one package the usual Tauri list omits: cpal links
+      # ALSA to capture the microphone, and without alsa.pc the build dies in
+      # alsa-sys long before it reaches bundling.
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -95,6 +99,7 @@ jobs:
             librsvg2-dev \
             libxdo-dev \
             libssl-dev \
+            libasound2-dev \
             build-essential \
             patchelf \
             libfuse2 \
