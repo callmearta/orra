@@ -198,6 +198,26 @@ pub fn verify_key(app: AppHandle) -> Result<String, String> {
     check(&key).map_err(|e| e.to_string())
 }
 
+/// Check the custom translation endpoint by asking it to translate something.
+///
+/// A real call rather than a models listing: it is the only check that covers
+/// the URL, the key and the model name together, and those are the three things
+/// that can be wrong with a hand-typed endpoint.
+///
+/// Off the invoke thread on purpose. A command that is not `async` runs inline
+/// in the handler, and the endpoint being tested may be a machine that accepts
+/// the connection and then says nothing — this call waits up to
+/// `translate::ENDPOINT_TIMEOUT` before giving up, and run inline that wait is
+/// the whole window frozen with no way to cancel it.
+#[tauri::command]
+pub async fn verify_translate(app: AppHandle) -> Result<String, String> {
+    let cfg = app.state::<AppState>().config();
+    tokio::task::spawn_blocking(move || crate::translate::check_custom(&cfg))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
 /// Write the push-to-talk bind into the Hyprland config right now.
 #[tauri::command]
 pub fn apply_hotkey(app: AppHandle) -> Result<String, String> {

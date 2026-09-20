@@ -101,7 +101,8 @@ See [Building from source](#building-from-source).
 
 You need **one** key for the provider that transcribes, and a **Deepgram** key
 if you also want read-aloud (that is the only service whose voices Orra
-uses).
+uses). Translating needs a **Gemini** key as well, unless you point Translation
+at your own OpenAI-compatible endpoint.
 
 | Provider | Where to get a key | Free tier |
 |---|---|---|
@@ -159,11 +160,19 @@ Settings.
 
 Hold the translating key (default `SUPER + ALT + T`) and speak. The dictation is
 transcribed as usual, translated, and *that* is typed. Set the target language
-and model under **Settings → Translation**.
-Translation runs on Gemini, so it needs a Gemini key whichever provider is
-transcribing. It is one extra round trip after you stop speaking, which is why
-it has a key of its own rather than being something every dictation waits for.
+and service under **Settings → Translation**.
 
+Translation runs on Gemini by default, so it needs a Gemini key whichever
+provider is transcribing. It can also run against **any OpenAI-compatible
+endpoint** — OpenAI, OpenRouter, Groq, or a model on your own machine — by
+setting the service to *Custom endpoint* and giving it an API URL, a model name
+and a key (a local server usually wants no key). The URL is the base one,
+ending at `/v1`; `/chat/completions` is appended to it. **Test endpoint** sends
+one short phrase through it, so a wrong URL or model name is found in Settings
+rather than mid-dictation.
+
+Translation is one extra round trip after you stop speaking, which is why it
+has a key of its own rather than being something every dictation waits for.
 If it fails, the words you actually said are typed instead and the reason is
 shown. The history entry keeps both: the translation as the dictation, and the
 original underneath it.
@@ -453,7 +462,7 @@ src-tauri/src/
   gemini.rs      ┘
   audio.rs       microphone capture (cpal) and playback (rodio)
   polish.rs      transcript → typed text: fillers, voice commands, replacements
-  translate.rs   Gemini translation
+  translate.rs   translation: Gemini, or any OpenAI-compatible endpoint
   inject.rs      clipboard and keystroke delivery, per platform
   hotkeys.rs     global shortcuts; defers to hypr.rs on Hyprland
   hypr.rs        the managed Lua blocks and the overlay's window rule
@@ -528,8 +537,9 @@ first — see [Building from source](#building-from-source).
 
 - **Audio** goes only to the provider you configured, over TLS, while you hold
   the key.
-- **Transcripts** are sent to that provider for the duration of the stream, and
-  to Gemini a second time if you use translation or read-aloud.
+- **Transcripts** are sent to that provider for the duration of the stream, to
+  Deepgram a second time if you use read-aloud, and to the translation service
+  — Gemini, or the endpoint you configured — if you use translation.
 - **Settings and history never leave your machine.** They are plain files under
   `~/.config/orra/` — no telemetry, no analytics, no accounts.
 - **API keys** are read from the environment or a `.env`, or stored in plain text

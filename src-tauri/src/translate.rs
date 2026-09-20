@@ -6,10 +6,23 @@
 //! second network call, which is why it is a deliberate keystroke of its own
 //! rather than something every dictation pays for.
 
+use std::time::Duration;
+
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
-use crate::config::{Config, Provider};
+use crate::config::{Config, Provider, TranslateProvider};
+
+/// How long the custom endpoint gets before the dictation gives up on it.
+///
+/// ureq waits forever by default, and a URL someone typed can point at a
+/// machine that is switched off or a server that accepts the connection and
+/// then says nothing — an unfinished translation is a dictation that never
+/// gets typed at all, so this path gets a deadline. It is deliberately long:
+/// the endpoint may be a model on this machine, where a cold load alone can
+/// take a minute before the first token. The wait is visible as the overlay's
+/// processing state, so it does not look like nothing is happening.
+const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What the model is asked for. Translation only — no summaries, no answers,
 /// no explaining — because whatever comes back is typed out verbatim.
@@ -25,12 +38,148 @@ fn prompt(target: &str, text: &str) -> String {
 /// Translate `text` into the configured language. Blocking — call it from a
 /// worker thread.
 pub fn run(text: &str, cfg: &Config) -> Result<String> {
-    let key = cfg.key_for(Provider::Gemini).ok_or_else(|| {
-        anyhow!(
-            "Translating uses Gemini. Add GEMINI_API_KEY to .env or paste it in Settings."
-        )
+    match cfg.translate_provider {
+        TranslateProvider::Gemini => {
+            let key = cfg.key_for(Provider::Gemini).ok_or_else(|| {
+                anyhow!(
+                    "Translating uses Gemini. Add GEMINI_API_KEY to .env or paste it in Settings."
+                )
+            })?;
+            translate(&key, &cfg.translate_model, &cfg.translate_language, text)
+        }
+        TranslateProvider::Custom => translate_openai(
+            &cfg.translate_base_url,
+            &cfg.translate_api_key,
+            &cfg.translate_custom_model,
+            &cfg.translate_language,
+            text,
+        ),
+    }
+}
+
+/// Ask the custom endpoint for a throwaway translation, so a wrong URL, key or
+/// model name is found in Settings rather than halfway through a dictation.
+pub fn check_custom(cfg: &Config) -> Result<String> {
+    let out = translate_openai(
+        &cfg.translate_base_url,
+        &cfg.translate_api_key,
+        &cfg.translate_custom_model,
+        "en",
+        "hello",
+    )?;
+    Ok(format!("Endpoint answered — it translated a test phrase to {out:?}"))
+}
+
+/// The `/chat/completions` URL for a base URL.
+///
+/// What gets pasted varies — `https://api.openai.com/v1`, the same with a
+/// trailing slash, or the full path — so the slash comes off and the path is
+/// only added when it is not already there.
+fn chat_url(base_url: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.ends_with("/chat/completions") {
+        base.to_string()
+    } else {
+        format!("{base}/chat/completions")
+    }
+}
+
+/// Translate through any OpenAI-compatible `/chat/completions` endpoint.
+pub fn translate_openai(
+    base_url: &str,
+    key: &str,
+    model: &str,
+    language: &str,
+    text: &str,
+) -> Result<String> {
+    let base = base_url.trim();
+    if base.is_empty() {
+        return Err(anyhow!(
+            "No endpoint URL set. Paste one in Settings, under Translation."
+        ));
+    }
+    // Checked here rather than left to ureq, which reports the same thing as a
+    // bare URI parse error with no hint of which setting it came from.
+    if !base.starts_with("http://") && !base.starts_with("https://") {
+        return Err(anyhow!("The translation endpoint URL must start with http:// or https://"));
+    }
+
+    let mut req = ureq::post(&chat_url(base))
+        .config()
+        .timeout_global(Some(ENDPOINT_TIMEOUT))
+        // The endpoint's own complaint is in the body; a bare status code says
+        // nothing about which of the three settings is wrong.
+        .http_status_as_error(false)
+        .build()
+        .header("Content-Type", "application/json");
+
+    // A local server usually wants no key at all, and an empty `Bearer ` is
+    // what makes some of them refuse the request, so the header stays off.
+    let key = key.trim();
+    if !key.is_empty() {
+        req = req.header("Authorization", &format!("Bearer {key}"));
+    }
+
+    let resp = req
+        .send_json(json!({
+            "model": model.trim(),
+            "messages": [{
+                "role": "user",
+                "content": prompt(&crate::state::language_label(language), text),
+            }],
+            // Deliberately no `temperature`, unlike the Gemini call. The newest
+            // OpenAI models reject any value but their default with a 400, and
+            // there is no way for the user to work around that from here. The
+            // prompt is what keeps the reply to the translation.
+        }))
+        .map_err(|e| anyhow!("could not reach the endpoint at {base}: {e}"))?;
+
+    let status = resp.status();
+    let body = resp
+        .into_body()
+        .read_to_vec()
+        .map_err(|e| anyhow!("reading response: {e}"))?;
+
+    if !status.is_success() {
+        return Err(anyhow!(
+            "{base} returned HTTP {}: {}",
+            status.as_u16(),
+            complaint(&body)
+        ));
+    }
+
+    let v: Value = serde_json::from_slice(&body).map_err(|e| {
+        anyhow!("{base} did not return JSON ({e}) — is it an OpenAI-compatible API?")
     })?;
-    translate(&key, &cfg.translate_model, &cfg.translate_language, text)
+
+    let out = v
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if out.is_empty() {
+        return Err(anyhow!("the model returned no translation"));
+    }
+    Ok(out)
+}
+
+/// An endpoint's own words about what went wrong. Every OpenAI-compatible
+/// server puts the reason at `/error/message`; anything else — an HTML error
+/// page from a proxy in the way, say — is at least worth a short snippet.
+fn complaint(body: &[u8]) -> String {
+    if let Ok(v) = serde_json::from_slice::<Value>(body) {
+        if let Some(m) = v.pointer("/error/message").and_then(Value::as_str) {
+            return m.to_string();
+        }
+    }
+    let text = String::from_utf8_lossy(body);
+    let snippet: String = text.trim().chars().take(300).collect();
+    if snippet.is_empty() {
+        "no reason given".to_string()
+    } else {
+        snippet
+    }
 }
 
 /// Translate with a named Gemini model into a language code.
@@ -109,6 +258,131 @@ mod tests {
         assert_eq!(crate::state::language_label("en"), "English");
         // An unknown code is still something a model can act on.
         assert_eq!(crate::state::language_label("xx"), "XX");
+    }
+
+    /// People paste the base URL every way there is, and the path must come out
+    /// the same each time — a doubled `/v1/v1` or a missing `/chat/completions`
+    /// is a 404 they have no way to read as "you typed it slightly wrong".
+    #[test]
+    fn a_base_url_becomes_the_chat_endpoint() {
+        for paste in [
+            "https://api.openai.com/v1",
+            "https://api.openai.com/v1/",
+            "  https://api.openai.com/v1  ",
+            "https://openrouter.ai/api/v1",
+            "http://localhost:11434/v1",
+        ] {
+            assert_eq!(chat_url(paste), format!("{}/chat/completions", paste.trim().trim_end_matches('/')));
+        }
+        // Pasting the whole path is fine too, and is not appended to twice.
+        assert_eq!(
+            chat_url("https://api.openai.com/v1/chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn a_broken_endpoint_is_reported_before_anything_is_sent() {
+        let mut cfg = Config {
+            translate_provider: TranslateProvider::Custom,
+            ..Config::default()
+        };
+
+        // Nothing configured: the error has to name the missing setting.
+        let e = run("hello", &cfg).unwrap_err().to_string();
+        assert!(e.contains("endpoint URL"), "unhelpful: {e}");
+
+        // A bare host is a common paste, and ureq alone would report it as an
+        // opaque URI parse failure.
+        cfg.translate_base_url = "api.openai.com/v1".into();
+        let e = run("hello", &cfg).unwrap_err().to_string();
+        assert!(e.contains("http://"), "unhelpful: {e}");
+    }
+
+    /// The request and the reply are the whole feature, and the exact JSON
+    /// paths in each are the part nothing else catches. A stub server on
+    /// loopback is the only way to check both without a live endpoint and a key.
+    #[test]
+    fn a_call_goes_out_and_a_reply_comes_back() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            // The client is waiting on the reply rather than closing, so the
+            // request is read until it goes quiet.
+            sock.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = sock.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..n]);
+            }
+
+            // What an OpenAI-compatible service sends back, padding and all.
+            let body = r#"{"choices":[{"message":{"role":"assistant","content":"  hello there  "}}]}"#;
+            let _ = write!(
+                sock,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            String::from_utf8_lossy(&request).to_lowercase()
+        });
+
+        let out = translate_openai(
+            &format!("http://127.0.0.1:{port}/v1"),
+            "sk-test",
+            "gpt-4o-mini",
+            "en",
+            "سلام",
+        )
+        .expect("the stub answered");
+        // Only the reply's text, trimmed: anything else is typed out verbatim.
+        assert_eq!(out, "hello there");
+
+        let request = server.join().unwrap();
+        assert!(request.starts_with("post /v1/chat/completions "), "wrong path: {request}");
+        assert!(request.contains("bearer sk-test"), "no key sent: {request}");
+        // Not matched on `"model":"..."` — ureq pretty-prints the body, so the
+        // spaces around the colon are not ours to rely on.
+        assert!(request.contains("gpt-4o-mini"), "no model: {request}");
+        // The instruction and the transcript both have to reach the endpoint.
+        assert!(request.contains("into english"), "no instruction: {request}");
+        assert!(request.contains("سلام"), "no transcript: {request}");
+    }
+
+    #[test]
+    fn an_endpoints_own_complaint_is_what_gets_shown() {
+        // The shape OpenAI, OpenRouter, Groq and the rest all use.
+        let body = br#"{"error":{"message":"Incorrect API key provided","type":"invalid_request_error"}}"#;
+        assert_eq!(complaint(body), "Incorrect API key provided");
+
+        // No JSON to read — a proxy's HTML error page still beats "HTTP 502".
+        assert_eq!(complaint(b"<html>Bad Gateway</html>"), "<html>Bad Gateway</html>");
+        assert_eq!(complaint(b""), "no reason given");
+    }
+
+    /// Ignored by default — needs the network and an OpenAI-compatible endpoint.
+    /// Run with:
+    ///   `ORRA_TEST_BASE_URL=... ORRA_TEST_API_KEY=... ORRA_TEST_MODEL=... \
+    ///    cargo test translate_openai -- --ignored --nocapture`
+    #[test]
+    #[ignore = "hits a real endpoint; run with --ignored"]
+    fn a_real_custom_endpoint_translates() {
+        let base = std::env::var("ORRA_TEST_BASE_URL").expect("ORRA_TEST_BASE_URL must be set");
+        let key = std::env::var("ORRA_TEST_API_KEY").unwrap_or_default();
+        let model = std::env::var("ORRA_TEST_MODEL").expect("ORRA_TEST_MODEL must be set");
+
+        let out = translate_openai(&base, &key, &model, "en", "سلام، این یک آزمایش است.\nخط دوم.")
+            .expect("translation failed");
+        println!("translated: {out:?}");
+        assert!(out.to_lowercase().contains("hello") || out.to_lowercase().contains("test"));
+        assert!(out.contains('\n'), "the line break was dropped: {out:?}");
     }
 
     /// Ignored by default — needs the network and a live key. Run with:

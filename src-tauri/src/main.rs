@@ -75,6 +75,7 @@ fn main() {
             commands::cycle_language,
             commands::set_language,
             commands::verify_key,
+            commands::verify_translate,
             commands::apply_hotkey,
             commands::show_main,
             commands::quit,

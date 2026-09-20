@@ -15,6 +15,11 @@ export interface Rule {
 export type Mode = 'hold' | 'toggle';
 export type Injection = 'clipboard-paste' | 'type';
 export type Provider = 'deepgram' | 'assemblyai' | 'gemini';
+/**
+ * What translates, which is independent of what transcribes: dictating with
+ * Deepgram and translating with something else is the normal case.
+ */
+export type TranslateProvider = 'gemini' | 'custom';
 
 /** The providers on offer, in the order they are listed. */
 export const PROVIDERS: [Provider, string][] = [
@@ -50,7 +55,12 @@ export interface Config {
   replacements: Rule[];
   translate_hotkey: string;
   translate_language: string;
+  translate_provider: TranslateProvider;
   translate_model: string;
+  /** OpenAI-compatible endpoint; `/chat/completions` is appended to it. */
+  translate_base_url: string;
+  translate_custom_model: string;
+  translate_api_key: string;
   tts_enabled: boolean;
   tts_model: string;
   tts_autoplay: boolean;
@@ -196,6 +206,8 @@ export const speak = (text: string) => invoke<void>('speak', { text });
 export const stopSpeaking = () => invoke<void>('stop_speaking');
 export const cycleLanguage = () => invoke<string>('cycle_language');
 export const verifyKey = () => invoke<string>('verify_key');
+/** Checks the custom translation endpoint, if that is what is configured. */
+export const verifyTranslate = () => invoke<string>('verify_translate');
 export const applyHotkey = () => invoke<string>('apply_hotkey');
 export const reinject = (id: string) => invoke<void>('reinject', { id });
 export const deleteHistory = (id: string) => invoke<void>('delete_history', { id });

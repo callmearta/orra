@@ -32,6 +32,7 @@ const PROVIDER_BLURB: Record<api.Provider, string> = {
 export default function SettingsPage() {
   const { config, status, notify, update, updateNow } = useStore();
   const [keyStatus, setKeyStatus] = useState<string | null>(null);
+  const [translateStatus, setTranslateStatus] = useState<string | null>(null);
   const [quitting, setQuitting] = useState(false);
 
   if (!config) return null;
@@ -288,23 +289,122 @@ export default function SettingsPage() {
 
         <Divider />
 
-        <Row
-          label="Model"
-          sub="Translation runs on Gemini, whichever provider is transcribing, so it uses the Gemini key."
-        >
+        <div>
+          <Label htmlFor="translate-provider">Service</Label>
           <Select
-            className="w-auto"
-            aria-label="Translation model"
-            value={config.translate_model}
-            onChange={(e) => update({ translate_model: e.target.value })}
+            id="translate-provider"
+            value={config.translate_provider}
+            onChange={(e) => {
+              // The last check was about the service being switched away from.
+              setTranslateStatus(null);
+              void updateNow({ translate_provider: e.target.value as api.TranslateProvider });
+            }}
           >
-            {TRANSLATE_MODELS.map(([id, label]) => (
-              <option key={id} value={id}>
-                {label}
-              </option>
-            ))}
+            <option value="gemini">Gemini</option>
+            <option value="custom">Custom endpoint (OpenAI-compatible)</option>
           </Select>
-        </Row>
+          <p className="text-[12px] text-muted mt-1.5">
+            {config.translate_provider === 'gemini'
+              ? 'Whichever provider is transcribing, translating runs on Gemini, so it uses the Gemini key.'
+              : 'Any service that speaks the OpenAI /chat/completions API: OpenAI, OpenRouter, Groq, or a model running on this machine.'}
+          </p>
+        </div>
+
+        {config.translate_provider === 'gemini' ? (
+          <Row label="Model" sub="A flash model is plenty — one short instruction and a paragraph of text.">
+            <Select
+              className="w-auto"
+              aria-label="Translation model"
+              value={config.translate_model}
+              onChange={(e) => update({ translate_model: e.target.value })}
+            >
+              {TRANSLATE_MODELS.map(([id, label]) => (
+                <option key={id} value={id}>
+                  {label}
+                </option>
+              ))}
+            </Select>
+          </Row>
+        ) : (
+          <>
+            <div>
+              <Label htmlFor="translate-url">API URL</Label>
+              <Input
+                id="translate-url"
+                placeholder="https://api.openai.com/v1"
+                value={config.translate_base_url}
+                onChange={(e) => {
+                  // Editing any of the three fields invalidates the last check,
+                  // or a pass for the old endpoint sits there reading as a pass
+                  // for the one just typed.
+                  setTranslateStatus(null);
+                  update({ translate_base_url: e.target.value });
+                }}
+              />
+              <p className="text-[12px] text-muted mt-1.5">
+                The base URL, ending at <code>/v1</code> or whatever your service uses.{' '}
+                <code>/chat/completions</code> is added for you.
+              </p>
+            </div>
+
+            <div>
+              <Label htmlFor="translate-custom-model">Model</Label>
+              <Input
+                id="translate-custom-model"
+                placeholder="gpt-4o-mini"
+                value={config.translate_custom_model}
+                onChange={(e) => {
+                  setTranslateStatus(null);
+                  update({ translate_custom_model: e.target.value });
+                }}
+              />
+              <p className="text-[12px] text-muted mt-1.5">
+                Named exactly as your service expects it, e.g. <code>gpt-4o-mini</code> or{' '}
+                <code>llama3.1:8b</code>.
+              </p>
+            </div>
+
+            <div>
+              <Label htmlFor="translate-key">API key</Label>
+              <Input
+                id="translate-key"
+                type="password"
+                placeholder="Not needed for a local server"
+                value={config.translate_api_key}
+                onChange={(e) => {
+                  setTranslateStatus(null);
+                  update({ translate_api_key: e.target.value });
+                }}
+              />
+            </div>
+
+            <div className="flex items-center gap-3">
+              <Button
+                onClick={async () => {
+                  setTranslateStatus('Asking the endpoint…');
+                  try {
+                    // The fields above save on a debounce, so a Test clicked
+                    // straight after typing would otherwise check the values
+                    // from before. An empty patch writes what is on screen now.
+                    await updateNow({});
+                    const message = await api.verifyTranslate();
+                    setTranslateStatus(message);
+                    notify('Translation endpoint answered', 'ok');
+                  } catch (e) {
+                    setTranslateStatus(api.errorText(e));
+                    notify(api.errorText(e), 'err');
+                  }
+                }}
+              >
+                <ShieldCheck className="w-4 h-4" />
+                Test endpoint
+              </Button>
+              <span className="text-[12px] text-muted">
+                {translateStatus ?? 'Sends one short phrase through the endpoint you configured.'}
+              </span>
+            </div>
+          </>
+        )}
 
         <p className="text-[12px] text-muted">
           Translation is one extra round trip after you finish speaking, which is why it has a key

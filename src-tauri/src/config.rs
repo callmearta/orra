@@ -48,6 +48,20 @@ impl Provider {
     }
 }
 
+/// What translates. Separate from [`Provider`] because the two halves of a
+/// dictation are independent: transcribing with Deepgram and translating with
+/// something else is the normal case, not the odd one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum TranslateProvider {
+    /// Gemini, using the same key the app already resolves for transcription.
+    #[default]
+    Gemini,
+    /// Anything that speaks the OpenAI `/chat/completions` shape: OpenAI itself,
+    /// OpenRouter, Groq, a local Ollama or LM Studio.
+    Custom,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum Injection {
@@ -101,10 +115,21 @@ pub struct Config {
     pub translate_hotkey: String,
     /// The language the translation comes out in, as a code: `en`, `fa`, ...
     pub translate_language: String,
-    /// The Gemini model that does the translating. Gemini is the only service
-    /// here that both takes a plain instruction and is already configured for
-    /// the other half of the app.
+    /// Which service does the translating.
+    pub translate_provider: TranslateProvider,
+    /// The Gemini model that does the translating, when Gemini is the provider.
+    /// Gemini is the default because it is already configured for the other half
+    /// of the app and takes a plain instruction.
     pub translate_model: String,
+    /// Base URL of an OpenAI-compatible endpoint, e.g. `https://api.openai.com/v1`.
+    /// `/chat/completions` is appended to it.
+    pub translate_base_url: String,
+    /// The model to ask that endpoint for. Free text: there is no list to offer
+    /// for a service we have never heard of.
+    pub translate_custom_model: String,
+    /// Key for that endpoint. One field per provider, like the transcription
+    /// keys, so switching back and forth does not mean re-pasting anything.
+    pub translate_api_key: String,
 
     // ---- text to speech ----
     pub tts_enabled: bool,
@@ -161,8 +186,14 @@ impl Default for Config {
             replacements: Vec::new(),
             translate_hotkey: "SUPER + ALT + T".into(),
             translate_language: "en".into(),
+            translate_provider: TranslateProvider::default(),
             // Verified working and far less contended than the newest flash.
             translate_model: "gemini-3.5-flash".into(),
+            // Empty until someone picks the custom provider: there is no
+            // sensible default endpoint or model to guess at.
+            translate_base_url: String::new(),
+            translate_custom_model: String::new(),
+            translate_api_key: String::new(),
             tts_enabled: true,
             tts_model: "aura-2-thalia-en".into(),
             tts_autoplay: false,
@@ -333,6 +364,10 @@ mod tests {
         assert_eq!(cfg.api_key, "stored");
         assert!(cfg.assemblyai_key.is_empty());
         assert!(cfg.gemini_key.is_empty());
+        // Same rule for translation: the provider that was there all along is
+        // the one an older file keeps using, and it needs nothing new filled in.
+        assert_eq!(cfg.translate_provider, TranslateProvider::Gemini);
+        assert!(cfg.translate_base_url.is_empty());
         // Which key `key_for` then returns depends on the environment this runs
         // in — environment first, then `.env`, then the stored one — so that is
         // deliberately not asserted here.

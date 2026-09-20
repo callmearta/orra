@@ -135,7 +135,8 @@ jobs:
             **Windows** — run the `-setup.exe` installer.
 
             Orra needs an API key for one of Deepgram, AssemblyAI or Gemini; see
-            the [README](https://github.com/callmearta/orra#api-keys).
+            the [README](https://github.com/callmearta/orra#api-keys). Translation
+            can also run against any OpenAI-compatible endpoint you point it at.
 
       # Untagged run (workflow_dispatch): same build, no release.
       - name: Build only
