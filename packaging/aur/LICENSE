@@ -1,0 +1,9 @@
+Orra — https://github.com/callmearta/orra
+
+No license is granted yet — all rights reserved.
+
+That is the project's own statement, copied from its README. It is installed
+here because a package under `license=('custom')` is required to carry the terms
+it is distributed under, and this is what those terms currently say.
+
+If you want to use this code, open an issue upstream.

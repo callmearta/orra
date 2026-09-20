@@ -14,6 +14,15 @@
 /flow-insights-dashboard/node_modules/
 /flow-insights-dashboard/dist/
 
+# --- packaging -----------------------------------------------------------
+# What `makepkg` leaves behind: the source tarball it downloaded, the tree it
+# unpacked it into, and the package it built. Only the four files the AUR wants
+# belong in the repository.
+/packaging/aur/src/
+/packaging/aur/pkg/
+/packaging/aur/*.tar.gz
+/packaging/aur/*.pkg.tar.*
+
 # --- editors and OS ------------------------------------------------------
 .DS_Store
 Thumbs.db

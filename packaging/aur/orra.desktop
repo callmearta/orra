@@ -1,0 +1,10 @@
+[Desktop Entry]
+Categories=Office;
+Comment=Voice dictation for your whole desktop
+Exec=orra
+StartupWMClass=orra
+Icon=orra
+Name=Orra
+Terminal=false
+Type=Application
+Keywords=dictation;speech;voice;transcription;
