@@ -1,6 +1,6 @@
 [package]
 name = "orra"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 # Two binaries are declared below, so `cargo run` needs to be told which one is
 # the app; the Tauri CLI shells out to a bare `cargo run`.
