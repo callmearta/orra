@@ -2850,16 +2850,18 @@ dependencies = [
 
 [[package]]
 name = "orra"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
  "cpal 0.18.2",
  "futures-util",
+ "libc",
  "rodio",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-global-shortcut",

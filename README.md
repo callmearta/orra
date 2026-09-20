@@ -5,14 +5,15 @@
 </div>
 
 A desktop dictation app. It streams speech-to-text from Deepgram, AssemblyAI or
-Gemini, can translate before typing, and reads text back with Deepgram Aura —
-wrapped in [Tauri](https://tauri.app) so one Rust codebase builds for Linux,
-macOS and Windows.
+Gemini — or from a speech-to-text server you run yourself, in which case the
+audio never leaves the machine. It can translate before typing, and reads text
+back with Deepgram Aura — wrapped in [Tauri](https://tauri.app) so one Rust
+codebase builds for Linux, macOS and Windows.
 
 - **Streaming, not batch.** Words appear in an overlay while you speak; the
   transcript is typed the moment you release the key.
-- **Three interchangeable providers.** Pick on cost, accuracy and the shape of
-  the transcript.
+- **Interchangeable providers.** Pick on cost, accuracy and the shape of the
+  transcript — including [a model on your own machine](#local-models).
 - **Local by default.** Settings and history never leave your machine. Only the
   audio you dictate goes to the provider you chose — see
   [Privacy](#privacy-and-what-leaves-your-machine).
@@ -25,6 +26,7 @@ macOS and Windows.
 - [Install](#install)
 - [API keys](#api-keys)
 - [Using it](#using-it)
+- [Local models](#local-models)
 - [Hotkeys](#hotkeys)
 - [Where things live](#where-things-live)
 - [Building from source](#building-from-source)
@@ -65,6 +67,16 @@ Every tagged release carries a bundle for each platform — Linux AppImage, deb
 and rpm, and a Windows installer. Grab the one for your system from
 [Releases](https://github.com/callmearta/orra/releases).
 
+**Arch, and anything derived from it**
+
+```bash
+yay -S orra      # or: paru -S orra
+```
+
+Built from the tagged source by the packaging in [packaging/aur](packaging/aur),
+which is the same thing the AUR entry holds. It pulls in `wtype`, `wl-clipboard`
+and the webview libraries itself.
+
 **Debian / Ubuntu**
 
 ```bash
@@ -86,10 +98,15 @@ chmod +x Orra_0.1.1_amd64.AppImage
 
 **Windows** — run the `Orra_0.1.1_x64-setup.exe` installer.
 
-The deb and rpm declare `wtype` and `wl-clipboard` as dependencies, so your
-package manager should pull them in. On Arch, `sudo pacman -S wtype wl-clipboard`;
-on an AppImage, install them yourself. On an X11 session you want `xdotool`
-instead of `wtype`.
+The deb, rpm and AUR package declare `wtype` and `wl-clipboard` as dependencies,
+so your package manager pulls them in; on an AppImage, install them yourself. On
+an X11 session you want `xdotool` instead of `wtype`.
+
+There is deliberately **no Flatpak**. The sandbox blocks the
+`zwp_virtual_keyboard` protocol that `wtype` uses and the data-control protocol
+`wl-clipboard` uses, so a Flatpak build could transcribe but never type —
+the one thing the app is for. The deb, rpm, AppImage and AUR packages run
+unsandboxed and do the whole job.
 
 ### From source
 
@@ -109,6 +126,11 @@ at your own OpenAI-compatible endpoint.
 | Deepgram | <https://console.deepgram.com> | Yes, $200 credit |
 | AssemblyAI | <https://www.assemblyai.com/dashboard> | Yes, limited hours |
 | Google Gemini | <https://aistudio.google.com/apikey> | Yes, rate-limited |
+
+Everything under [Local models](#local-models) needs no key at all unless your server asks for
+one, and the environment is never consulted for it — there is no convention to
+name such a variable, so what is in Settings is what is sent. See
+[Local models](#local-models).
 
 There are three ways to supply a key. **Resolution order is: environment → a
 nearby `.env` → the value saved in Settings**, so an exported variable always
@@ -153,8 +175,12 @@ the key takes the overlay away at once — the audio is still being flushed to t
 provider and the text has not been typed yet, which is what the falling tone
 marks.
 
-Press `SUPER + ALT + L` to step to the next dictation language without opening
-Settings.
+The language button on the Dictate page opens the full list for whatever is
+transcribing — every language Deepgram or the server you pointed at accepts —
+and picking one applies to the next dictation. `SUPER + ALT + L` steps through
+the short list from the Voice page instead, for switching between two languages
+without leaving the keyboard. Neither applies to Gemini, which works the
+language out for itself.
 
 ### Translation
 
@@ -246,6 +272,96 @@ any comma left hanging off them.
 `~/.config/orra/history.jsonl`. Copy, re-insert, read aloud or delete any of
 them. **Insights** aggregates over the same file — words per minute, streak,
 where you dictate, vocabulary breadth.
+
+---
+
+## Local models
+
+Dictation does not have to leave the machine. **Settings → Transcription
+service → Provider** lists the servers people actually run, each named for
+itself, and choosing one fills in the address it normally answers on. The audio
+goes to that address and nowhere else.
+
+| Provider | Endpoint it fills in | Type |
+|---|---|---|
+| Ollama | `http://localhost:11434/v1` | HTTP |
+| [Speaches](https://speaches.ai) (formerly faster-whisper-server) | `http://localhost:8000/v1` | HTTP, or WebSocket for live text |
+| [LocalAI](https://localai.io) | `http://localhost:8080/v1` | HTTP, or WebSocket for live text |
+| [whisper.cpp](https://github.com/ggml-org/whisper.cpp) `whisper-server` | `http://localhost:8080/inference` | HTTP |
+| Custom endpoint | whatever you paste | HTTP, or WebSocket |
+| Orra — open-source models | filled in for you | HTTP |
+
+The address stays editable whatever you pick — ports are not always the default
+— and OpenAI, Groq, Mistral and OpenRouter are reachable through **Custom
+endpoint** with their own URLs.
+
+**Ollama** is in the list for its audio-capable models (`gemma4` and up) rather
+than for its own sake: it is an LLM server, and `/v1/audio/transcriptions` is not
+something it has always answered. A dedicated whisper server is the safer
+choice.
+
+**Orra — open-source models** is the entry that needs nothing installed first.
+Pick a model, press **Download**, then **Use this model**, and Orra fetches the
+engine ([whisper.cpp](https://github.com/ggml-org/whisper.cpp)) and the weights,
+starts the server itself, and fills in the address and the transport to match.
+Nothing is added to the app bundle: the weights land in
+`~/.local/share/orra/models` and the engine in `~/.local/share/orra/bin`, both
+checked against a sha256 pinned in the binary as they arrive — one of them is
+executed, so what gets executed is what was reviewed. The engine runs until you
+press **Stop** or quit Orra, and a large model holds a couple of gigabytes of
+memory while it does. macOS has no upstream command-line build to fetch, so this
+entry hides itself there.
+
+### Type
+
+How Orra talks to the server. The three are not interchangeable in what you get
+back, which is the whole reason the choice is yours:
+
+- **HTTP** posts the recording when you release the key, and the transcript
+  lands a moment later. This is the OpenAI `/audio/transcriptions` shape, and
+  every one of those servers answers it. Orra appends `/audio/transcriptions` to
+  the URL you give it, unless you pasted a path that is already an endpoint —
+  whisper.cpp's `/inference` is used exactly as typed.
+- **HTTP (streaming)** sends the same request with `stream=true` and reads the
+  transcript out as the server decodes it, so a long dictation fills the overlay
+  rather than appearing all at once. Still nothing until you release the key:
+  the audio does not exist before then.
+- **WebSocket** is the OpenAI Realtime API, and it is the only one that shows
+  words *while you are speaking*, the way the cloud providers do. OpenAI,
+  LocalAI, Speaches and vLLM implement it. Audio is resampled to the 24 kHz the
+  session declares.
+
+A server that does not implement the transport you picked will either refuse the
+connection or answer with an error naming what it did not understand — the Type
+is the setting to try changing first.
+
+### Model
+
+Type it, or press **Fetch models** to ask the server what it has
+(`GET {endpoint}/models` — the same call fills in the translation endpoint's
+model field, which is how an Ollama model gets picked rather than remembered).
+The button is only offered where the server actually publishes a list: Ollama,
+Speaches, LocalAI and a custom endpoint. whisper.cpp transcribes with the model
+it was started with, and so does the engine Orra runs, so neither has one.
+
+**Check server** transcribes half a second of silence and reads the reply. That
+is the only check that covers the address, the port, the transport, the model
+name and the key together — and it is the same code path a dictation takes, so a
+pass here means dictating will work. Asking for a model list instead would fail
+on every server that does not publish one.
+
+### What is different from the cloud providers
+
+- **Nothing is typed until the transcript arrives.** With HTTP that is on
+  release; the words are not edited, translated or injected any differently —
+  voice commands, replacements, translation and the trailing space all work the
+  same way.
+- **No confidence figures.** These servers do not report any, so local
+  dictations are left out of the confidence average in Insights rather than
+  guessed at.
+- **Accuracy and speed are yours to trade.** A large model on a CPU is slower
+  than real time and rarely matches nova-3; a small one is quick and makes more
+  mistakes. The model name is the dial.
 
 ---
 
@@ -461,6 +577,12 @@ listen socket, and assert it comes back as words — a genuine end-to-end check 
 both endpoints, including that `multi` transcribes correctly and that
 `detect_language` is never sent (the streaming endpoint rejects it).
 
+The local provider is covered without a server: loopback stubs in `local.rs`
+assert what actually goes on the wire — the multipart fields, the SSE deltas,
+the Realtime session update and its event parser — because on that path the
+request *is* the feature, and a server that never sees the field it wants has no
+way to say so.
+
 ---
 
 ## Architecture
@@ -474,6 +596,7 @@ src-tauri/src/
   deepgram.rs    ┐
   assemblyai.rs  ├ each provider's URL, framing and message parser
   gemini.rs      ┘
+  local.rs       a server you run: HTTP, SSE, and the Realtime socket
   audio.rs       microphone capture (cpal) and playback (rodio)
   polish.rs      transcript → typed text: fillers, voice commands, replacements
   translate.rs   translation: Gemini, or any OpenAI-compatible endpoint
@@ -492,10 +615,13 @@ flow-insights-dashboard/   React + TypeScript + Vite + Tailwind settings UI
 
 Two design choices worth knowing before changing things:
 
-- **One session loop, three providers.** `stt.rs` owns the connect → feed →
-  drain → flush state machine. Everything provider-specific is behind the `Wire`
-  struct: the URL, how audio is framed, how a server message is read, what closes
-  the stream. Adding a provider means writing one module, not another loop.
+- **One session loop, every streaming provider.** `stt.rs` owns the connect →
+  feed → drain → flush state machine. Everything provider-specific is behind the
+  `Wire` struct: what to send on open, how audio is framed, how a server message
+  is read, what closes the stream, how long a flush is given. Adding a provider
+  means writing one module, not another loop — the local provider's WebSocket
+  transport rides the same one, and only its HTTP transports run separately,
+  because they cannot hand over any audio until the recording has ended.
 - **The arithmetic is in Rust.** Streaks, words-per-minute and month boundaries
   live in `stats.rs` so `cargo test` covers them; the frontend only lays out what
   that returns.
@@ -543,6 +669,29 @@ Languages to switch between**. AssemblyAI streaming covers 18 languages and
 silently *ignores* an unsupported code, so Orra only sends the ones it
 supports. Gemini detects the language itself and takes no codes.
 
+**Nothing appears until I let go of the key (local server).** That is HTTP. Only
+the WebSocket transport can show words while you are still speaking, because the
+other two have no audio to send until the recording has ended. If your server
+speaks the Realtime API — OpenAI, LocalAI, Speaches, vLLM — set Type to
+**WebSocket**.
+
+**"Fetch models" fails on my local server.** Not every one of them publishes a
+list — the button is only offered where they do, so being able to press it means
+the server should answer. A server that replies with HTML is telling you it is
+not an OpenAI-compatible API in the first place. The field is free text either
+way.
+
+**"Orra — open-source models" is missing from the list.** There is no upstream
+command-line build for this platform to fetch (macOS ships an xcframework and
+nothing else), so the entry hides itself rather than offering a download that
+would 404. Point **Custom endpoint** at a server you run instead.
+
+**A local dictation types nothing, or the server refuses the request.** The
+error quotes what the server said, and it usually names the setting at fault:
+`model not found` wants the model field filled in (or the model pulled on the
+server), and a connection refused means nothing is listening on that port. The
+same server has to be running before you dictate — Orra does not start it.
+
 **`cargo build` fails with a missing `dist`.** The frontend has to be built
 first — see [Building from source](#building-from-source).
 
@@ -551,7 +700,9 @@ first — see [Building from source](#building-from-source).
 ## Privacy and what leaves your machine
 
 - **Audio** goes only to the provider you configured, over TLS, while you hold
-  the key.
+  the key — or, with any of the [local providers](#local-models), to a URL on
+  your own network and nowhere else. Orra still sends it; point that URL at a
+  server on this machine and it never crosses the network at all.
 - **Transcripts** are sent to that provider for the duration of the stream, to
   Deepgram a second time if you use read-aloud, and to the translation service
   — Gemini, or the endpoint you configured — if you use translation.

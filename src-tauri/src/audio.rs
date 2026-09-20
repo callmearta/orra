@@ -231,6 +231,77 @@ pub fn i16_to_le_bytes(samples: &[i16]) -> Vec<u8> {
     b
 }
 
+/// A 16-bit mono WAV around `samples`.
+///
+/// 16-bit mono PCM is what every endpoint this app sends audio to accepts —
+/// whisper.cpp's server without `--convert` takes nothing else — and the header
+/// is 44 bytes of well-known fields, so it is written here rather than pulling
+/// in an encoder for it.
+pub fn wav_bytes(samples: &[i16], rate: u32) -> Vec<u8> {
+    let data = i16_to_le_bytes(samples);
+    let mut wav = Vec::with_capacity(44 + data.len());
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&((36 + data.len()) as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16u32.to_le_bytes()); // PCM header size
+    wav.extend_from_slice(&1u16.to_le_bytes()); // format: PCM
+    wav.extend_from_slice(&1u16.to_le_bytes()); // channels
+    wav.extend_from_slice(&rate.to_le_bytes());
+    wav.extend_from_slice(&(rate * 2).to_le_bytes()); // byte rate
+    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
+    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    wav.extend_from_slice(&data);
+    wav
+}
+
+/// Resample mono samples to `to` hertz.
+///
+/// Every endpoint that is not a live socket wants a fixed rate — 16 kHz is the
+/// one speech models are trained at, and 24 kHz is what the Realtime socket
+/// declares — while the microphone runs at whatever the device picked. Doing it
+/// here means one resampler instead of a rule at each call site.
+///
+/// ponytail: linear interpolation, not a windowed-sinc filter. At the ratios
+/// that matter here the integer case below is a proper box filter (which is the
+/// right anti-aliasing for 48k→16k), and speech recognition is not sensitive to
+/// the difference on the non-integer ones.
+pub fn resample_to(samples: &[i16], from: u32, to: u32) -> Vec<i16> {
+    if samples.is_empty() || from == 0 || to == 0 || from == to {
+        return samples.to_vec();
+    }
+    let step = f64::from(from) / f64::from(to);
+    let out_len = ((samples.len() as f64) / step).floor() as usize;
+    let mut out = Vec::with_capacity(out_len);
+
+    // An exact integer ratio — 48 kHz to 16 kHz is the one that actually
+    // happens — averages the whole window each output sample covers, which
+    // removes the frequencies that would otherwise fold back as noise.
+    if from.is_multiple_of(to) {
+        let k = (from / to) as usize;
+        for i in 0..out_len {
+            let start = i * k;
+            let win = &samples[start..(start + k).min(samples.len())];
+            let sum: i32 = win.iter().map(|s| i32::from(*s)).sum();
+            out.push((sum / win.len().max(1) as i32) as i16);
+        }
+        return out;
+    }
+
+    // Otherwise interpolate between the two samples the position falls between.
+    let last = samples.len() - 1;
+    for i in 0..out_len {
+        let pos = i as f64 * step;
+        let a = pos.floor() as usize;
+        let b = (a + 1).min(last);
+        let t = pos - a as f64;
+        let v = f64::from(samples[a]) * (1.0 - t) + f64::from(samples[b]) * t;
+        out.push(v.round().clamp(f64::from(i16::MIN), f64::from(i16::MAX)) as i16);
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // TTS playback
 // ---------------------------------------------------------------------------
@@ -287,22 +358,7 @@ fn tone_wav(freq: f32, ms: u64) -> Vec<u8> {
         samples.push((wave * level * 0.22 * i16::MAX as f32) as i16);
     }
 
-    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-    let mut wav = Vec::with_capacity(44 + data.len());
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&((36 + data.len()) as u32).to_le_bytes());
-    wav.extend_from_slice(b"WAVEfmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes()); // PCM header size
-    wav.extend_from_slice(&1u16.to_le_bytes()); // format: PCM
-    wav.extend_from_slice(&1u16.to_le_bytes()); // channels
-    wav.extend_from_slice(&rate.to_le_bytes());
-    wav.extend_from_slice(&(rate * 2).to_le_bytes()); // byte rate
-    wav.extend_from_slice(&2u16.to_le_bytes()); // block align
-    wav.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    wav.extend_from_slice(&data);
-    wav
+    wav_bytes(&samples, rate)
 }
 
 #[cfg(test)]
@@ -345,5 +401,57 @@ mod tests {
         let (mono, peak) = downmix_f32(&[1.8, -1.8], 1);
         assert_eq!(mono, vec![i16::MAX, -i16::MAX]);
         assert!(peak <= 1.0);
+    }
+
+    #[test]
+    fn a_wav_header_describes_the_samples_it_carries() {
+        let samples = vec![0i16, 1000, -1000, 32767];
+        let wav = wav_bytes(&samples, 16_000);
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..12], b"WAVE");
+        assert_eq!(&wav[36..40], b"data");
+        // Mono, 16 kHz, 16-bit: the three fields a server reads to decide
+        // whether it can take the audio at all.
+        assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 1);
+        assert_eq!(u32::from_le_bytes([wav[24], wav[25], wav[26], wav[27]]), 16_000);
+        assert_eq!(u16::from_le_bytes([wav[34], wav[35]]), 16);
+        let body = u32::from_le_bytes([wav[40], wav[41], wav[42], wav[43]]) as usize;
+        assert_eq!(body, samples.len() * 2);
+        assert_eq!(wav.len(), 44 + body);
+        // The samples themselves survive, little-endian.
+        assert_eq!(&wav[44..48], &[0x00, 0x00, 0xE8, 0x03]);
+    }
+
+    #[test]
+    fn resampling_to_the_same_rate_changes_nothing() {
+        let samples: Vec<i16> = (0..100).map(|i| (i * 13) as i16).collect();
+        assert_eq!(resample_to(&samples, 16_000, 16_000), samples);
+        // Nothing to resample, and nothing to divide by.
+        assert_eq!(resample_to(&[], 48_000, 16_000), Vec::<i16>::new());
+    }
+
+    /// The case that actually happens: a device running at 48 kHz and an
+    /// endpoint that wants 16 kHz.
+    #[test]
+    fn a_third_of_the_samples_come_back_and_the_signal_survives() {
+        let silence = vec![0i16; 48_000];
+        let out = resample_to(&silence, 48_000, 16_000);
+        assert_eq!(out.len(), 16_000);
+        assert!(out.iter().all(|s| *s == 0), "silence must stay silent");
+
+        // A steady level is unchanged by averaging, which is what says the
+        // decimation is a filter rather than a drop-every-third-sample.
+        let steady = vec![1_000i16; 48_000];
+        let out = resample_to(&steady, 48_000, 16_000);
+        assert!(out.iter().all(|s| (*s - 1_000).abs() <= 1), "level moved: {:?}", &out[..4]);
+
+        // A second of audio is a second of audio whatever the rate, including
+        // on the non-integer ratio the Realtime socket needs.
+        let tone: Vec<i16> = (0..16_000)
+            .map(|i| ((i as f32 / 16_000.0 * 440.0 * std::f32::consts::TAU).sin() * 10_000.0) as i16)
+            .collect();
+        let upsampled = resample_to(&tone, 16_000, 24_000);
+        assert_eq!(upsampled.len(), 24_000);
+        assert!(upsampled.iter().any(|s| s.abs() > 5_000), "the tone was flattened");
     }
 }

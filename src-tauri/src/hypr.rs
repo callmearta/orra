@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use crate::config::{self, Config, Mode, Provider};
+use crate::config::{self, Config, Mode};
 
 const BEGIN: &str = "-- >>> orra (managed block - edits are overwritten) >>>";
 const END: &str = "-- <<< orra <<<";
@@ -99,10 +99,10 @@ hl.bind({translate_key}, hl.dsp.exec_cmd({}), {{ release = true, description = "
     }
 
     // Only bind a second key when there is something to switch between, and
-    // only for the provider that has languages to switch: the others detect
-    // one, or pick it with their model, and would do nothing with this key.
+    // only for a provider that takes a language: Gemini detects one itself and
+    // would do nothing with this key.
     let lang = cfg.language_hotkey.trim();
-    if cfg.provider == Provider::Deepgram && !lang.is_empty() && cfg.language_cycle.len() > 1 {
+    if cfg.provider.has_language() && !lang.is_empty() && cfg.language_cycle.len() > 1 {
         out.push('\n');
         out.push_str(&format!(
             r#"hl.bind({}, hl.dsp.exec_cmd({}), {{ description = "orra: next dictation language" }})"#,
@@ -264,6 +264,7 @@ mod tests {
     #![allow(clippy::field_reassign_with_default)]
 
     use super::*;
+    use crate::config::Provider;
 
     #[test]
     fn block_is_appended_once_and_replaced_on_reapply() {
@@ -372,6 +373,27 @@ mod tests {
             .collect();
         assert_eq!(lang.len(), 1);
         assert!(lang[0].contains("\"SUPER + ALT + L\""));
+    }
+
+    /// The switch key is not Deepgram's: a whisper server takes a language too,
+    /// and it is the only way to move between them without opening settings.
+    /// Gemini, which detects the language itself, is the one that gets nothing.
+    #[test]
+    fn the_language_key_follows_the_provider_that_takes_a_language() {
+        let mut cfg = Config::default();
+        cfg.translate_hotkey = String::new();
+        assert!(keybind_block(&cfg).contains("lang-next"), "Deepgram has a language");
+
+        for provider in [Provider::Ollama, Provider::WhisperCpp, Provider::Local, Provider::Orra] {
+            cfg.provider = provider;
+            assert!(keybind_block(&cfg).contains("lang-next"), "{provider:?} takes a language");
+        }
+
+        cfg.provider = Provider::Gemini;
+        assert!(
+            !keybind_block(&cfg).contains("lang-next"),
+            "Gemini detects the language and takes no code"
+        );
     }
 
     #[test]

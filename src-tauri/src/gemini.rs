@@ -28,11 +28,12 @@ const MODEL: &str = "models/gemini-3.5-transcribe-live";
 const SETUP: &str = r#"{"setup":{"model":"models/gemini-3.5-transcribe-live","generationConfig":{"responseModalities":["TEXT"]},"inputAudioTranscription":{"languageCodes":[],"mode":"VERBATIM"}}}"#;
 
 pub const WIRE: Wire = Wire {
-    handshake: &[SETUP],
+    handshake: |_| vec![SETUP.to_string()],
     awaits_handshake: true,
     // Asking for the end of the audio is what makes the server finalize the
     // open turn; it answers with the last transcript before the socket closes.
     close: &[r#"{"realtimeInput":{"audioStreamEnd":true}}"#],
+    flush: crate::stt::FLUSH_TIMEOUT,
     frame_samples,
     encode,
     decode,
@@ -265,8 +266,8 @@ mod tests {
             .expect("could not open the live socket");
         let (mut write, mut read) = ws.split();
 
-        for frame in WIRE.handshake {
-            write.send(Message::Text((*frame).into())).await.unwrap();
+        for frame in (WIRE.handshake)(&crate::config::Config::default()) {
+            write.send(Message::Text(frame.into())).await.unwrap();
         }
 
         // Wait for the setup acknowledgement before sending audio.

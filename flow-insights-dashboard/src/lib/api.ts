@@ -14,7 +14,29 @@ export interface Rule {
 
 export type Mode = 'hold' | 'toggle';
 export type Injection = 'clipboard-paste' | 'type';
-export type Provider = 'deepgram' | 'assemblyai' | 'gemini';
+export type Provider =
+  | 'deepgram'
+  | 'assemblyai'
+  | 'gemini'
+  // The servers people run themselves, each named for the one it is. They share
+  // the `local_*` settings and the same code; what differs is the URL, and
+  // which of the APIs that server answers on.
+  | 'ollama'
+  | 'speaches'
+  | 'localai'
+  | 'whispercpp'
+  // Anything else speaking those APIs: a URL the user typed.
+  | 'local'
+  // A model Orra fetches and runs on this machine itself.
+  | 'orra';
+/**
+ * How the local provider reaches its server.
+ *
+ * `http` posts the recording when the key is released, `sse` streams the
+ * transcript back as the server decodes it, and `websocket` is the only one of
+ * the three that shows words while they are still being spoken.
+ */
+export type LocalTransport = 'http' | 'sse' | 'websocket';
 /**
  * What translates, which is independent of what transcribes: dictating with
  * Deepgram and translating with something else is the normal case.
@@ -26,17 +48,51 @@ export const PROVIDERS: [Provider, string][] = [
   ['deepgram', 'Deepgram'],
   ['assemblyai', 'AssemblyAI'],
   ['gemini', 'Gemini'],
+  ['ollama', 'Ollama'],
+  ['speaches', 'Speaches'],
+  ['localai', 'LocalAI'],
+  ['whispercpp', 'whisper.cpp'],
+  ['local', 'Custom endpoint'],
+  ['orra', 'Orra — open-source models'],
 ];
 
-/** Which `config` field holds each provider's key. */
-export const KEY_FIELD: Record<Provider, 'api_key' | 'assemblyai_key' | 'gemini_key'> = {
-  deepgram: 'api_key',
-  assemblyai: 'assemblyai_key',
-  gemini: 'gemini_key',
-};
+/**
+ * The transports on offer: the value, the name, and what each one actually
+ * gives back — the last of which is the difference the user is choosing
+ * between, so it is spelled out where they choose it.
+ */
+export const LOCAL_TRANSPORTS: [LocalTransport, string, string][] = [
+  ['http', 'HTTP', 'The transcript arrives when you release the key. Works with every server.'],
+  ['sse', 'HTTP (streaming)', 'Words appear as the server decodes them, a moment after you release — still not while you speak.'],
+  ['websocket', 'WebSocket', 'Words appear while you are still speaking. Needs a server that speaks the Realtime API.'],
+];
 
 export const providerLabel = (p: Provider): string =>
   PROVIDERS.find(([value]) => value === p)?.[1] ?? p;
+
+/** A `Config` field that holds an API key. */
+export type KeyField = 'api_key' | 'assemblyai_key' | 'gemini_key' | 'local_key';
+
+/**
+ * What the backend says about a provider — mirrors `config::ProviderInfo`.
+ *
+ * The rules about which providers have a preset URL, a model list to fetch or a
+ * transport to choose live in Rust, next to the code they describe, and arrive
+ * here with the status. Anything the interface believed separately would be a
+ * second copy to keep in step.
+ */
+export interface ProviderInfo {
+  value: Provider;
+  label: string;
+  self_hosted: boolean;
+  key_field: KeyField;
+  env_var: string;
+  preset_url: string | null;
+  has_model_list: boolean;
+  has_transport_choice: boolean;
+  /** Whether the dictation language applies, and the switch key with it. */
+  has_language: boolean;
+}
 
 export interface Config {
   hotkey: string;
@@ -45,8 +101,20 @@ export interface Config {
   api_key: string;
   assemblyai_key: string;
   gemini_key: string;
+  local_key: string;
   stt_model: string;
   language: string;
+  /** Where the local provider's server is. */
+  local_base_url: string;
+  /** The model to ask it for. Free text; the list comes from the server. */
+  local_model: string;
+  local_transport: LocalTransport;
+  /**
+   * The model Orra runs on this machine itself, by name from the catalogue.
+   * Empty means the user runs their own server — which is also how a launch
+   * knows whether there is an engine to start.
+   */
+  local_engine_model: string;
   language_cycle: string[];
   language_hotkey: string;
   mic: string;
@@ -113,6 +181,7 @@ export interface Problem {
 /** Mirrors `commands::Status`. */
 export interface Status {
   config: Config;
+  providers: ProviderInfo[];
   recording: boolean;
   speaking: boolean;
   /** True when Hyprland owns the shortcut rather than the app. */
@@ -237,9 +306,72 @@ export const stopDictation = () => invoke<void>('stop_dictation');
 export const speak = (text: string) => invoke<void>('speak', { text });
 export const stopSpeaking = () => invoke<void>('stop_speaking');
 export const cycleLanguage = () => invoke<string>('cycle_language');
+/** Switch to a specific dictation language and remember it. */
+export const setLanguage = (code: string) => invoke<void>('set_language', { code });
 export const verifyKey = () => invoke<string>('verify_key');
 /** Checks the configured translation service by translating a short phrase. */
 export const verifyTranslate = () => invoke<string>('verify_translate');
+/**
+ * The models an OpenAI-compatible endpoint has, for the fields that fill
+ * themselves from it.
+ *
+ * The URL and key are passed rather than read from the saved settings, so the
+ * button works on what is on screen before the debounced save has gone through.
+ */
+export const listModels = (base_url: string, api_key: string) =>
+  invoke<string[]>('list_models', { baseUrl: base_url, apiKey: api_key });
+
+/* ------------------------------------------------- running one on this machine */
+
+/** One model Orra can fetch and run itself. */
+export interface LocalModel {
+  name: string;
+  label: string;
+  /** What it costs, in the words a user would use. */
+  note: string;
+  mb: number;
+  installed: boolean;
+}
+
+/** Mirrors `engine::Availability`. */
+export interface LocalAvailability {
+  /** False where upstream publishes no engine build for this platform. */
+  supported: boolean;
+  /** True once the engine has been unpacked and is ready to start. */
+  engine: boolean;
+  running: boolean;
+  /** The model the engine is running, if one is. */
+  running_model: string | null;
+  models: LocalModel[];
+}
+
+/** What a download is doing. Mirrors `engine::Progress`. */
+export interface LocalProgress {
+  /** `engine`, `starting`, or the model's name. */
+  what: string;
+  label: string;
+  received: number;
+  /** Zero when the size is not known — starting the engine reports no bytes. */
+  total: number;
+}
+
+/** What running a local model looks like right now. */
+export const localAvailability = () => invoke<LocalAvailability>('local_availability');
+
+/**
+ * Fetch a model — and the engine, once — and leave them on disk. Nothing runs
+ * until {@link useLocalModel} says so.
+ *
+ * Resolves when the download has finished, which can be a long wait on a slow
+ * connection; progress arrives meanwhile on the `local-download` event.
+ */
+export const downloadLocalModel = (name: string) => invoke<string>('download_local_model', { name });
+
+/** Start the engine again on a model that is already downloaded. */
+export const useLocalModel = (name: string) => invoke<string>('use_local_model', { name });
+
+/** Stop the engine. The weights stay on disk. */
+export const stopLocalEngine = () => invoke<void>('stop_local_engine');
 export const applyHotkey = () => invoke<string>('apply_hotkey');
 export const reinject = (id: string) => invoke<void>('reinject', { id });
 export const deleteHistory = (id: string) => invoke<void>('delete_history', { id });

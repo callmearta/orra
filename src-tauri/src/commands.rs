@@ -14,6 +14,9 @@ use crate::state::{self, AppState, Entry, Purpose};
 #[derive(Serialize)]
 pub struct Status {
     config: Config,
+    /// What each provider is and what it can be asked for, so the settings
+    /// screen draws the right fields without a second copy of those rules.
+    providers: Vec<crate::config::ProviderInfo>,
     recording: bool,
     speaking: bool,
     /// True when the push-to-talk bind is owned by Hyprland rather than the app.
@@ -28,7 +31,11 @@ fn status_of(app: &AppHandle) -> Status {
     let state = app.state::<AppState>();
     let cfg = state.config();
     Status {
-        has_key: cfg.api_key().is_some(),
+        // The local provider usually has no key to have, and reporting that as
+        // missing would read as "not set up yet" on a server that is running
+        // perfectly well.
+        has_key: cfg.provider.is_self_hosted() || cfg.api_key().is_some(),
+        providers: Provider::all().into_iter().map(Into::into).collect(),
         config: cfg,
         recording: state.is_recording(),
         speaking: state.speaking.load(std::sync::atomic::Ordering::Relaxed),
@@ -61,6 +68,19 @@ pub async fn save_config(app: AppHandle, config: Config) -> Result<String, Strin
         || previous.provider != config.provider
     {
         app.state::<AppState>().stop_session();
+    }
+
+    // The engine this app runs belongs to the provider that uses it: switching
+    // away leaves a process holding a gigabyte of memory for nothing, and
+    // switching back should not mean finding the model again. Started on its
+    // own thread either way — loading the weights is not something a settings
+    // save waits for.
+    if previous.provider != config.provider {
+        match config.provider {
+            Provider::Orra => crate::engine::start_configured(app.clone()),
+            _ if previous.provider == Provider::Orra => crate::engine::stop(&app),
+            _ => {}
+        }
     }
 
     let note = hotkeys::sync(&app, &config).unwrap_or_else(|e| e.to_string());
@@ -193,6 +213,17 @@ pub fn set_language(app: AppHandle, code: String) -> Result<(), String> {
 #[tauri::command]
 pub async fn verify_key(app: AppHandle) -> Result<String, Problem> {
     let cfg = app.state::<AppState>().config();
+
+    // A server the user runs has no key of its own to check and usually wants
+    // none: what is being checked is the endpoint, so it is asked for its model
+    // list — the same call the Settings button beside the model field makes.
+    if cfg.provider.is_self_hosted() {
+        let summary = format!("Checking the {} server", cfg.provider.label());
+        return crate::local::check(&cfg)
+            .await
+            .map_err(|e| Problem::new(summary, e, &cfg));
+    }
+
     let key = cfg.api_key().ok_or_else(|| {
         Problem::new(
             "No key to check",
@@ -205,6 +236,7 @@ pub async fn verify_key(app: AppHandle) -> Result<String, Problem> {
         Provider::Deepgram => deepgram::verify_key,
         Provider::AssemblyAi => assemblyai::verify_key,
         Provider::Gemini => gemini::verify_key,
+        _ => unreachable!("self-hosted providers are answered above, before a key is asked for"),
     };
     // Cloned because the closure below takes `cfg`, and the error paths still
     // need it to name the failure.
@@ -237,6 +269,88 @@ pub async fn verify_translate(app: AppHandle) -> Result<String, Problem> {
         .map_err(|e| Problem::new("Checking the translation service", e, &cert))
 }
 
+/// The models a server has, for the fields that fill themselves from it.
+///
+/// One command for both cards: the local transcription server and the custom
+/// translation endpoint are the same kind of thing — an OpenAI-compatible
+/// service — and both want the list of what is installed rather than a name
+/// typed from memory. The URL and key come from the fields themselves rather
+/// than from the saved settings, so the button works on what is on screen
+/// before the debounced save has gone through.
+///
+/// Off the invoke thread: the endpoint may be a model on this machine that has
+/// not been started yet, and this waits out the check timeout when it is not.
+#[tauri::command]
+pub async fn list_models(
+    app: AppHandle,
+    base_url: String,
+    api_key: String,
+) -> Result<Vec<String>, Problem> {
+    let cert = app.state::<AppState>().config();
+    let redaction = cert.clone();
+    tokio::task::spawn_blocking(move || crate::local::list_models(&base_url, &api_key))
+        .await
+        .map_err(|e| Problem::new("Listing the models failed", e, &redaction))?
+        .map_err(|e| Problem::new("Listing the models on that server", e, &cert))
+}
+
+/// What the Settings card needs to offer running a model here.
+#[tauri::command]
+pub fn local_availability(app: AppHandle) -> crate::engine::Availability {
+    crate::engine::availability(&app)
+}
+
+/// Fetch a model — and the engine, once — and leave them on disk.
+///
+/// Downloading and starting are separate on purpose: the first is a wait on the
+/// user's connection with nothing to show for it but progress, and the second
+/// is a choice they can make later, or undo with Stop without throwing the
+/// weights away.
+///
+/// Off the invoke thread, because it is a gigabyte over that connection.
+#[tauri::command]
+pub async fn download_local_model(app: AppHandle, name: String) -> Result<String, Problem> {
+    let cert = app.state::<AppState>().config();
+    let handle = app.clone();
+    let wanted = name.clone();
+    tokio::task::spawn_blocking(move || crate::engine::download(&handle, &wanted))
+        .await
+        .map_err(|e| Problem::new("Downloading the local model failed", e, &cert))?
+        .map_err(|e| Problem::new("Downloading the local model", e, &cert))?;
+
+    let label = crate::engine::model(&name).map(|m| m.label).unwrap_or(&name);
+    Ok(format!("{label} is downloaded. Choose it and press Use this model to start it."))
+}
+
+/// Start the engine on a model that is already downloaded, and point the
+/// settings at it — the second half of the one-click path.
+#[tauri::command]
+pub async fn use_local_model(app: AppHandle, name: String) -> Result<String, Problem> {
+    let cert = app.state::<AppState>().config();
+    let handle = app.clone();
+    let wanted = name.clone();
+    // Starting it also writes the address it landed on into the settings: the
+    // port is chosen fresh each time, so the one saved from last time is stale.
+    let url = tokio::task::spawn_blocking(move || {
+        let model = crate::engine::model(&wanted)
+            .ok_or_else(|| anyhow::anyhow!("there is no local model called {wanted}"))?;
+        crate::engine::start_and_record(&handle, model)
+    })
+    .await
+    .map_err(|e| Problem::new("Starting the local model failed", e, &cert))?
+    .map_err(|e| Problem::new("Starting the local model", e, &cert))?;
+
+    let label = crate::engine::model(&name).map(|m| m.label).unwrap_or(&name);
+    Ok(format!("{label} is running at {url}. Hold your key and speak."))
+}
+
+/// Stop the engine this app started. The model stays on disk.
+#[tauri::command]
+pub fn stop_local_engine(app: AppHandle) {
+    crate::engine::stop(&app);
+    let _ = app.emit("status", ());
+}
+
 /// Write the push-to-talk bind into the Hyprland config right now.
 #[tauri::command]
 pub fn apply_hotkey(app: AppHandle) -> Result<String, String> {
@@ -255,6 +369,8 @@ pub fn show_main(app: AppHandle) {
 
 #[tauri::command]
 pub fn quit(app: AppHandle) {
+    // The engine is this app's child process, and nothing else outlives it.
+    crate::engine::stop(&app);
     app.exit(0);
 }
 

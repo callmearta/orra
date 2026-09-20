@@ -25,16 +25,34 @@ pub enum Provider {
     Deepgram,
     AssemblyAi,
     Gemini,
+    /// The servers people actually run, each with the port and the path it
+    /// normally answers on. Naming them separately is what turns "find out what
+    /// URL your server is on, and which of the three APIs it speaks" into a
+    /// choice from a list; everything about them is still a setting, and the
+    /// URL is still editable for the ports that are not the default.
+    Ollama,
+    Speaches,
+    LocalAi,
+    WhisperCpp,
+    /// Anything else speaking the same APIs: a URL, a model, and which of the
+    /// transports it answers on. This is what the local provider was before the
+    /// named ones existed, and a config that says `local` still means it.
+    Local,
+    /// A model this app downloads and runs itself. See [`crate::engine`].
+    Orra,
 }
 
 impl Provider {
     /// The environment variable (and `.env` key) this provider's key is read
-    /// from, before the copy stored in settings.
+    /// from, before the copy stored in settings. Empty for everything the user
+    /// hosts themselves: there is no convention for naming such a variable, and
+    /// most of these servers want no key at all.
     pub fn env_var(self) -> &'static str {
         match self {
             Provider::Deepgram => "DEEPGRAM_API_KEY",
             Provider::AssemblyAi => "ASSEMBLYAI_API_KEY",
             Provider::Gemini => "GEMINI_API_KEY",
+            _ => "",
         }
     }
 
@@ -44,8 +62,152 @@ impl Provider {
             Provider::Deepgram => "Deepgram",
             Provider::AssemblyAi => "AssemblyAI",
             Provider::Gemini => "Gemini",
+            Provider::Ollama => "Ollama",
+            Provider::Speaches => "Speaches",
+            Provider::LocalAi => "LocalAI",
+            Provider::WhisperCpp => "whisper.cpp",
+            Provider::Local => "Custom endpoint",
+            Provider::Orra => "Orra — open-source models",
         }
     }
+
+    /// Whether this is one of the servers the user hosts, and so shares the
+    /// `local_*` settings and the code in [`crate::local`].
+    pub fn is_self_hosted(self) -> bool {
+        !matches!(self, Provider::Deepgram | Provider::AssemblyAi | Provider::Gemini)
+    }
+
+    /// Where this server normally answers, when it has a usual port.
+    ///
+    /// `None` for the two that cannot be guessed at: a custom endpoint is
+    /// whatever the user pasted, and the model Orra runs itself is on a port
+    /// this app picked.
+    pub fn preset_url(self) -> Option<&'static str> {
+        match self {
+            Provider::Ollama => Some("http://localhost:11434/v1"),
+            Provider::Speaches => Some("http://localhost:8000/v1"),
+            Provider::LocalAi => Some("http://localhost:8080/v1"),
+            // Not an OpenAI path: whisper.cpp's own server has only this one,
+            // and it is why the endpoint setting is editable at all.
+            Provider::WhisperCpp => Some("http://localhost:8080/inference"),
+            _ => None,
+        }
+    }
+
+    /// Whether the server can be asked what models it has.
+    ///
+    /// False for the two that keep the model out of the request: whisper.cpp's
+    /// own endpoint transcribes with the model it was started with, and the
+    /// engine Orra runs is told its model at startup. Offering a model list for
+    /// them means offering a button that can only fail.
+    pub fn has_model_list(self) -> bool {
+        !matches!(self, Provider::WhisperCpp | Provider::Orra)
+    }
+
+    /// Whether the transport is the user's to choose.
+    ///
+    /// The engine Orra starts is a whisper.cpp server, so it is HTTP by
+    /// definition; the rest are whichever API their server happens to speak.
+    pub fn has_transport_choice(self) -> bool {
+        self.is_self_hosted() && self != Provider::Orra
+    }
+
+    /// Whether this provider takes a language at all.
+    ///
+    /// Everything but Gemini, which detects the language itself and takes no
+    /// code — including the servers the user runs, where the code is a hint
+    /// that mostly saves the model the guesswork.
+    pub fn has_language(self) -> bool {
+        self != Provider::Gemini
+    }
+
+    /// Which field of [`Config`] holds this provider's key.
+    pub fn key_field(self) -> &'static str {
+        match self {
+            Provider::Deepgram => "api_key",
+            Provider::AssemblyAi => "assemblyai_key",
+            Provider::Gemini => "gemini_key",
+            _ => "local_key",
+        }
+    }
+
+    /// Every provider, in the order the settings list them.
+    ///
+    /// The settings screen draws itself from this rather than from a list of
+    /// its own: which of these have a URL to preset, a model list to fetch or a
+    /// transport to choose is a fact about the provider, and a second copy of
+    /// it in the interface is a second thing to keep in step.
+    pub fn all() -> Vec<Provider> {
+        vec![
+            Provider::Deepgram,
+            Provider::AssemblyAi,
+            Provider::Gemini,
+            Provider::Ollama,
+            Provider::Speaches,
+            Provider::LocalAi,
+            Provider::WhisperCpp,
+            Provider::Local,
+            Provider::Orra,
+        ]
+    }
+}
+
+/// One provider, as the settings screen needs to know it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProviderInfo {
+    pub value: Provider,
+    pub label: &'static str,
+    pub self_hosted: bool,
+    /// The `Config` field holding its key, so the interface does not have to
+    /// keep its own copy of that mapping.
+    pub key_field: &'static str,
+    pub env_var: &'static str,
+    /// Where it normally answers, when that can be known. The field is still
+    /// the user's to edit — this is what it starts as.
+    pub preset_url: Option<&'static str>,
+    pub has_model_list: bool,
+    pub has_transport_choice: bool,
+    /// Whether the dictation language applies, and the switch key with it.
+    pub has_language: bool,
+}
+
+impl From<Provider> for ProviderInfo {
+    fn from(p: Provider) -> Self {
+        Self {
+            value: p,
+            label: p.label(),
+            self_hosted: p.is_self_hosted(),
+            key_field: p.key_field(),
+            env_var: p.env_var(),
+            preset_url: p.preset_url(),
+            has_model_list: p.has_model_list(),
+            has_transport_choice: p.has_transport_choice(),
+            has_language: p.has_language(),
+        }
+    }
+}
+
+/// How the local provider talks to its server.
+///
+/// Three shapes rather than one because no single one is spoken by everything
+/// worth pointing at, and they are not interchangeable in what the user gets
+/// back: only a WebSocket can carry audio up as it is spoken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum LocalTransport {
+    /// `POST {base}/audio/transcriptions`, multipart, the OpenAI shape — which
+    /// is also what Ollama, LocalAI, Speaches, vLLM and LM Studio answer. The
+    /// transcript arrives when the recording ends.
+    #[default]
+    Http,
+    /// The same request with `stream=true`: the server sends the transcript as
+    /// it decodes it. Still nothing until the key is released — the audio only
+    /// exists then — but the words arrive as they are decided rather than in
+    /// one lump at the end.
+    Sse,
+    /// The OpenAI Realtime socket, which takes audio continuously. This is the
+    /// only transport that shows words in the overlay while they are spoken.
+    WebSocket,
 }
 
 /// What translates. Separate from [`Provider`] because the two halves of a
@@ -95,7 +257,20 @@ pub struct Config {
     pub api_key: String,
     pub assemblyai_key: String,
     pub gemini_key: String,
+    pub local_key: String,
     pub stt_model: String,
+    /// Where the local provider's server is. Not validated here: the whole
+    /// point is to point it at something this app has never heard of.
+    pub local_base_url: String,
+    /// The model to ask that server for. Free text, and empty until a server
+    /// has been pointed at and asked what it has.
+    pub local_model: String,
+    /// Which of the three shapes that server speaks. See [`LocalTransport`].
+    pub local_transport: LocalTransport,
+    /// The model this app runs on this machine itself, by name from
+    /// [`crate::engine::MODELS`]. Empty means the user runs their own server —
+    /// which is also how a launch knows whether there is an engine to start.
+    pub local_engine_model: String,
     /// A Deepgram language code, or `multi` for nova-3's multilingual mode.
     pub language: String,
     /// The language hotkey steps through this list. Kept short — it is a quick
@@ -173,7 +348,15 @@ impl Default for Config {
             api_key: String::new(),
             assemblyai_key: String::new(),
             gemini_key: String::new(),
+            local_key: String::new(),
             stt_model: "nova-3".into(),
+            // Empty until someone points at a server: there is no port or path
+            // this app could guess at, and guessing wrong is worse than the
+            // empty field saying it has not been set up yet.
+            local_base_url: String::new(),
+            local_model: String::new(),
+            local_transport: LocalTransport::default(),
+            local_engine_model: String::new(),
             // Multilingual by default: it handles English at least as well as
             // pinning `en`, and follows a switch into the other languages it
             // covers without a settings trip.
@@ -236,6 +419,18 @@ pub fn history_path() -> PathBuf {
     config_dir().join("history.jsonl")
 }
 
+/// Where downloaded things live — the engine binary and the model weights.
+///
+/// Data rather than config: these are megabytes the app fetched and can fetch
+/// again, not preferences anyone typed. A `~/.config` that is synced or backed
+/// up should not have 1.6 GB of model in it.
+pub fn data_dir() -> PathBuf {
+    match std::env::var_os("XDG_DATA_HOME") {
+        Some(d) if !d.is_empty() => PathBuf::from(d).join("orra"),
+        _ => home().join(".local/share/orra"),
+    }
+}
+
 /// Where the Hyprland config lives, if it is a Lua config.
 pub fn hypr_lua_dir() -> PathBuf {
     home().join(".config/hypr/config")
@@ -280,20 +475,30 @@ impl Config {
     /// Environment first, then any nearby `.env`, then the stored override.
     pub fn key_for(&self, provider: Provider) -> Option<String> {
         let var = provider.env_var();
-        if let Ok(k) = std::env::var(var) {
-            if !k.trim().is_empty() {
-                return Some(k.trim().to_string());
+        // The local provider has no environment variable to read — there is no
+        // convention for naming one — so it is answered from settings alone.
+        // Skipped rather than looked up as the empty string, which would match a
+        // stray `=value` line in a `.env`.
+        if !var.is_empty() {
+            if let Ok(k) = std::env::var(var) {
+                if !k.trim().is_empty() {
+                    return Some(k.trim().to_string());
+                }
             }
-        }
-        for p in dotenv_candidates() {
-            if let Some(k) = read_dotenv_key(&p, var) {
-                return Some(k);
+            for p in dotenv_candidates() {
+                if let Some(k) = read_dotenv_key(&p, var) {
+                    return Some(k);
+                }
             }
         }
         let stored = match provider {
             Provider::Deepgram => &self.api_key,
             Provider::AssemblyAi => &self.assemblyai_key,
             Provider::Gemini => &self.gemini_key,
+            // One field for all of them: they are the same setting — the key
+            // for whichever server is on the other end — and switching between
+            // two of them should not mean pasting it again.
+            _ => &self.local_key,
         };
         let k = stored.trim();
         (!k.is_empty()).then(|| k.to_string())
@@ -338,7 +543,7 @@ fn read_dotenv_key(path: &std::path::Path, key: &str) -> Option<String> {
     None
 }
 
-fn random_token() -> String {
+pub(crate) fn random_token() -> String {
     // No rand dependency: the nanoseconds clock plus the pid is plenty of
     // entropy for a loopback-only shared secret.
     let nanos = std::time::SystemTime::now()
@@ -378,11 +583,99 @@ mod tests {
         assert_eq!(Provider::Deepgram.env_var(), "DEEPGRAM_API_KEY");
         assert_eq!(Provider::AssemblyAi.env_var(), "ASSEMBLYAI_API_KEY");
         assert_eq!(Provider::Gemini.env_var(), "GEMINI_API_KEY");
+        // Nothing the user hosts has an environment variable, which is what
+        // makes `key_for` answer those from settings alone.
+        for p in [Provider::Ollama, Provider::Speaches, Provider::LocalAi, Provider::WhisperCpp, Provider::Local, Provider::Orra] {
+            assert_eq!(p.env_var(), "", "{p:?}");
+            assert!(p.is_self_hosted(), "{p:?}");
+        }
+        assert_eq!(Provider::Local.label(), "Custom endpoint");
         // ...and the names the settings UI sends back round-trip.
-        for p in [Provider::Deepgram, Provider::AssemblyAi, Provider::Gemini] {
+        for p in [
+            Provider::Deepgram,
+            Provider::AssemblyAi,
+            Provider::Gemini,
+            Provider::Ollama,
+            Provider::Speaches,
+            Provider::LocalAi,
+            Provider::WhisperCpp,
+            Provider::Local,
+            Provider::Orra,
+        ] {
             let json = serde_json::to_string(&p).unwrap();
             assert_eq!(serde_json::from_str::<Provider>(&json).unwrap(), p);
         }
+        // The spelling that was shipped first keeps meaning the same thing, so
+        // a settings file written then still loads as the custom endpoint
+        // rather than failing to parse and taking every other setting with it.
+        assert_eq!(serde_json::from_str::<Provider>("\"local\"").unwrap(), Provider::Local);
+    }
+
+    /// The presets exist for their URLs, and the two that have none are the two
+    /// that cannot be guessed at.
+    #[test]
+    fn each_named_server_knows_where_it_normally_answers() {
+        assert_eq!(Provider::Ollama.preset_url(), Some("http://localhost:11434/v1"));
+        assert_eq!(Provider::Speaches.preset_url(), Some("http://localhost:8000/v1"));
+        assert_eq!(Provider::LocalAi.preset_url(), Some("http://localhost:8080/v1"));
+        // whisper.cpp's own path, which is not an OpenAI one.
+        assert_eq!(Provider::WhisperCpp.preset_url(), Some("http://localhost:8080/inference"));
+        assert_eq!(Provider::Local.preset_url(), None);
+        assert_eq!(Provider::Orra.preset_url(), None);
+    }
+
+    /// What the settings card is allowed to offer. A model list belongs to the
+    /// servers that keep the model in the request, and the transport is only a
+    /// choice where the server has a say in it.
+    #[test]
+    fn only_the_servers_with_a_model_list_are_offered_one() {
+        assert!(Provider::Ollama.has_model_list());
+        assert!(Provider::Speaches.has_model_list());
+        assert!(Provider::Local.has_model_list());
+        // Transcribes with the model it was started with.
+        assert!(!Provider::WhisperCpp.has_model_list());
+        // Told its model when Orra starts it.
+        assert!(!Provider::Orra.has_model_list());
+
+        assert!(Provider::Ollama.has_transport_choice());
+        assert!(Provider::WhisperCpp.has_transport_choice());
+        assert!(!Provider::Orra.has_transport_choice());
+        assert!(!Provider::Deepgram.has_transport_choice());
+    }
+
+    /// The local provider is the one whose key is never in the environment, so
+    /// a machine with no `ORRA_*` variable set is the normal case rather than a
+    /// misconfiguration.
+    #[test]
+    fn a_local_key_comes_from_settings_and_is_optional() {
+        let cfg = Config { local_key: "  sk-local-test-key-1234  ".into(), ..Config::default() };
+        assert_eq!(cfg.key_for(Provider::Local).as_deref(), Some("sk-local-test-key-1234"));
+
+        // Nothing stored, nothing required: a server on loopback usually has no
+        // auth at all, and asking for a key would make it unusable.
+        let bare = Config::default();
+        assert_eq!(bare.key_for(Provider::Local), None);
+    }
+
+    /// The three transports are spelled the way the settings UI sends them, and
+    /// a config written before they existed is an HTTP server rather than a
+    /// broken one.
+    #[test]
+    fn the_local_transport_round_trips_and_defaults_to_http() {
+        for (t, json) in [
+            (LocalTransport::Http, "\"http\""),
+            (LocalTransport::Sse, "\"sse\""),
+            (LocalTransport::WebSocket, "\"websocket\""),
+        ] {
+            assert_eq!(serde_json::to_string(&t).unwrap(), json);
+            assert_eq!(serde_json::from_str::<LocalTransport>(json).unwrap(), t);
+        }
+
+        let older: Config = serde_json::from_str(r#"{"local_base_url":"http://localhost:8000/v1"}"#)
+            .expect("a config from before transports still parses");
+        assert_eq!(older.local_transport, LocalTransport::Http);
+        assert!(older.local_model.is_empty());
+        assert!(older.local_key.is_empty());
     }
 
     #[test]

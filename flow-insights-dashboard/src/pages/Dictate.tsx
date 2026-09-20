@@ -1,8 +1,9 @@
 import { CircleStop, Play, Square, Volume2 } from 'lucide-react';
 
+import { LanguagePicker } from '@/components/LanguagePicker';
 import { Button, Card, Meter, PageHeading, Pill, Row, SectionTitle } from '@/components/ui';
 import * as api from '@/lib/api';
-import { languageLabel } from '@/lib/deepgram-catalog';
+import { languageName, languagesFor } from '@/lib/languages';
 import { num } from '@/lib/stats';
 import { useStore } from '@/store';
 
@@ -34,18 +35,21 @@ export default function DictatePage({ onOpenSettings }: { onOpenSettings: () => 
     }
   };
 
-  const switchLanguage = async () => {
+  const setLanguage = async (code: string) => {
     try {
-      notify(`Language: ${languageLabel(await api.cycleLanguage())}`, 'ok');
+      await api.setLanguage(code);
+      notify(`Language: ${languageName(code, languages)}`, 'ok');
     } catch (e) {
       fail(api.problemOf(e));
     }
   };
 
   const totals = insights?.totals;
-  // The language belongs to Deepgram: it is the only provider here that cannot
-  // detect one, and the only one that takes a code at all.
-  const deepgram = config.provider === 'deepgram';
+  const provider = status?.providers.find((p) => p.value === config.provider);
+  const selfHosted = provider?.self_hosted ?? false;
+  // Empty for the providers that take no language — Gemini detects one, and
+  // there is nothing to offer a picker for.
+  const languages = languagesFor(config.provider);
 
   return (
     <>
@@ -79,9 +83,13 @@ export default function DictatePage({ onOpenSettings }: { onOpenSettings: () => 
               {phase}
             </Pill>
             <span className="text-[12px] text-muted">
-              {deepgram
-                ? `Listening in ${languageLabel(config.language)}`
-                : `Transcribing with ${api.providerLabel(config.provider)}`}
+              {selfHosted
+                ? // The model is the part the user chose on a server they run,
+                  // so that is the half worth naming.
+                  `Transcribing with ${config.local_model || api.providerLabel(config.provider)}`
+                : languages.length > 0
+                  ? `Listening in ${languageName(config.language, languages)}`
+                  : `Transcribing with ${api.providerLabel(config.provider)}`}
             </span>
           </div>
 
@@ -120,7 +128,18 @@ export default function DictatePage({ onOpenSettings }: { onOpenSettings: () => 
                 Stop reading
               </Button>
             )}
-            {deepgram && <Button onClick={switchLanguage}>Switch language</Button>}
+            {languages.length > 0 && (
+              <LanguagePicker
+                current={config.language}
+                options={languages}
+                note={
+                  selfHosted
+                    ? 'A whisper model works out the language on its own; picking one mostly saves it the guesswork. The dictation language applies the moment you choose it.'
+                    : 'The language the next dictation is transcribed in. Pick it here, or step through the list on the Voice page with the switch key.'
+                }
+                onPick={(code) => void setLanguage(code)}
+              />
+            )}
           </div>
         </div>
       </Card>

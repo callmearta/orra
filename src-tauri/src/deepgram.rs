@@ -16,9 +16,10 @@ use crate::stt::{url_encode, Flow, Session, Wire};
 pub const WIRE: Wire = Wire {
     // Nothing to set up: the parameters are all in the URL and the socket is
     // ready for audio the moment it opens.
-    handshake: &[],
+    handshake: |_| Vec::new(),
     awaits_handshake: false,
     close: &[r#"{"type":"CloseStream"}"#],
+    flush: crate::stt::FLUSH_TIMEOUT,
     frame_samples: no_framing,
     encode,
     decode,

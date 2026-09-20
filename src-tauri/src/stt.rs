@@ -40,9 +40,9 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// tick or two, so this only ever bounds a device that is slow to close.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// How long the provider is given to flush once the stream has been asked to
-/// close.
-const FLUSH_TIMEOUT: Duration = Duration::from_secs(4);
+/// How long the clouds are given to flush once the stream has been asked to
+/// close. What a provider that is not a cloud uses is its own `Wire::flush`.
+pub const FLUSH_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// A running dictation. Dropping it (or calling `stop`) flushes the stream.
 pub struct SttSession {
@@ -50,6 +50,15 @@ pub struct SttSession {
 }
 
 impl SttSession {
+    /// A session that ends when `stop` is sent.
+    ///
+    /// For providers that do not go through [`start`]: the local one's HTTP
+    /// transports run their own loop, and what the rest of the app holds has to
+    /// be the same handle either way.
+    pub(crate) fn from_stop(stop: oneshot::Sender<()>) -> Self {
+        Self { stop: Some(stop) }
+    }
+
     /// Ask the provider to flush and close; the text is delivered after that.
     pub fn stop(&mut self) {
         if let Some(tx) = self.stop.take() {
@@ -97,6 +106,22 @@ impl Session {
         self.interim = text.trim().to_string();
     }
 
+    /// Add to the tail of a sentence still being spoken.
+    ///
+    /// Separate from [`Session::set_interim`] because a provider that sends each
+    /// fragment once — the Realtime protocol does — cannot replace the tail
+    /// without losing what came before it, and the whitespace at the edges of a
+    /// fragment is the only thing saying where one word ends and the next
+    /// begins. Only the leading edge of a fresh tail is trimmed, so consecutive
+    /// fragments join the way the server wrote them.
+    pub fn append_interim(&mut self, delta: &str) {
+        if self.interim.is_empty() {
+            self.interim = delta.trim_start().to_string();
+        } else {
+            self.interim.push_str(delta);
+        }
+    }
+
     /// What the overlay should be showing: the transcript so far, and the words
     /// that are still being spoken.
     pub fn show(&self, app: &AppHandle) {
@@ -134,15 +159,37 @@ pub enum Flow {
     Done,
 }
 
+/// Where a provider listens, and how to talk to it.
+pub struct Endpoint {
+    pub url: String,
+    /// The header the key goes in, spelled the way this provider wants it, or
+    /// `None` when the key travels another way — Gemini carries it in the URL,
+    /// and a local server usually has none at all.
+    pub auth: Option<(&'static str, String)>,
+    pub wire: Wire,
+}
+
 /// Everything a provider has to answer for the shared session loop.
 pub struct Wire {
     /// Sent as soon as the socket opens, before any audio.
-    pub handshake: &'static [&'static str],
+    ///
+    /// A function of the settings rather than a constant, because the local
+    /// provider has to name its model and its language in there and both of
+    /// those are settings; the clouds ignore the argument.
+    pub handshake: fn(&Config) -> Vec<String>,
     /// Whether the socket must wait for the provider to answer the handshake
     /// before it will take audio. Gemini does; the others are happy either way.
     pub awaits_handshake: bool,
     /// Sent once every sample has been written, to ask for the last transcript.
     pub close: &'static [&'static str],
+    /// How long the provider is given to flush once the stream has been asked
+    /// to close.
+    ///
+    /// Per provider, because what is being waited for is a model decoding the
+    /// last utterance: a cloud answers in about as long as the round trip, while
+    /// a model on this machine can take tens of seconds over a long dictation
+    /// and would be cut off mid-sentence by the cloud's deadline.
+    pub flush: Duration,
     /// How many samples to gather into one frame, for providers that only take
     /// audio in sizeable blocks. Zero sends the device's own blocks as they
     /// arrive, which is the lowest latency and what Deepgram wants.
@@ -161,13 +208,25 @@ pub struct Wire {
 /// the words spoken while the socket was opening are transcribed along with the
 /// rest, and the overlay has something to show from the instant the key goes
 /// down rather than a second later.
+///
+/// The local provider is dispatched before any of that: its transports are not
+/// sockets, and its session is built in [`crate::local`]. What comes back is the
+/// same handle either way, so nothing above this cares which one it got.
 pub fn start(
     app: AppHandle,
     cfg: &Config,
     id: u64,
-    mut capture: Capture,
+    capture: Capture,
     purpose: crate::state::Purpose,
 ) -> Result<SttSession> {
+    // A server the user runs is a different shape of session — its audio is
+    // gathered and handed over rather than streamed, and there is no key to
+    // insist on — so it brings its own loop. Every one of those providers,
+    // named or custom or run by this app, is the same code from here.
+    if cfg.provider.is_self_hosted() {
+        return crate::local::start(app, cfg, id, capture, purpose);
+    }
+
     let key = cfg.api_key().ok_or_else(|| {
         anyhow!(
             "No {} API key. Add {} to .env or paste it in Settings.",
@@ -178,22 +237,45 @@ pub fn start(
 
     // Gemini carries its key in the URL; the other two send it as a header,
     // spelled differently by each.
-    let (url, auth, wire): (String, Option<(&'static str, String)>, Wire) = match cfg.provider {
-        Provider::Deepgram => (
-            deepgram::build_url(&deepgram::SttOptions::from_config(cfg), capture.sample_rate),
-            Some(("Authorization", format!("Token {key}"))),
-            deepgram::WIRE,
-        ),
-        Provider::AssemblyAi => (
-            assemblyai::url(capture.sample_rate, &cfg.language),
-            Some(("Authorization", key)),
-            assemblyai::WIRE,
-        ),
-        Provider::Gemini => (gemini::url(&key), None, gemini::WIRE),
+    let endpoint = match cfg.provider {
+        Provider::Deepgram => Endpoint {
+            url: deepgram::build_url(&deepgram::SttOptions::from_config(cfg), capture.sample_rate),
+            auth: Some(("Authorization", format!("Token {key}"))),
+            wire: deepgram::WIRE,
+        },
+        Provider::AssemblyAi => Endpoint {
+            url: assemblyai::url(capture.sample_rate, &cfg.language),
+            auth: Some(("Authorization", key)),
+            wire: assemblyai::WIRE,
+        },
+        Provider::Gemini => Endpoint { url: gemini::url(&key), auth: None, wire: gemini::WIRE },
+        // All returned above, before any key was asked for.
+        Provider::Ollama
+        | Provider::Speaches
+        | Provider::LocalAi
+        | Provider::WhisperCpp
+        | Provider::Local
+        | Provider::Orra => unreachable!("self-hosted sessions are dispatched before this match"),
     };
 
+    Ok(spawn_session(app, cfg.clone(), id, capture, purpose, endpoint))
+}
+
+/// Drive one dictation over a socket.
+///
+/// The clouds arrive here through [`start`]; the local provider's Realtime
+/// transport calls it directly, because the loop below is the same work whoever
+/// is on the other end — only the URL, the auth header and the [`Wire`] differ.
+pub fn spawn_session(
+    app: AppHandle,
+    cfg: Config,
+    id: u64,
+    mut capture: Capture,
+    purpose: crate::state::Purpose,
+    endpoint: Endpoint,
+) -> SttSession {
+    let Endpoint { url, auth, wire } = endpoint;
     let (stop_tx, mut stop_rx) = oneshot::channel::<()>();
-    let cfg = cfg.clone();
 
     tokio::spawn(async move {
         let mic = capture.handle();
@@ -273,8 +355,8 @@ pub fn start(
         };
         let (mut write, mut read) = socket.split();
 
-        for frame in wire.handshake {
-            let _ = write.send(Message::Text((*frame).into())).await;
+        for frame in (wire.handshake)(&cfg) {
+            let _ = write.send(Message::Text(frame.into())).await;
         }
 
         // The mic may have been stopped while the handshake was still running,
@@ -395,7 +477,7 @@ pub fn start(
                 }
                 session.closing = true;
                 flushed = true;
-                flush_deadline.as_mut().reset(tokio::time::Instant::now() + FLUSH_TIMEOUT);
+                flush_deadline.as_mut().reset(tokio::time::Instant::now() + wire.flush);
             }
         }
 
@@ -413,7 +495,7 @@ pub fn start(
         crate::state::finish_dictation(&app, id, &raw, &cfg, spoken, purpose).await;
     });
 
-    Ok(SttSession { stop: Some(stop_tx) })
+    SttSession { stop: Some(stop_tx) }
 }
 
 /// Percent-encode everything outside the unreserved set (RFC 3986).

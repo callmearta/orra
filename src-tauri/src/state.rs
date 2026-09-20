@@ -89,6 +89,10 @@ pub struct Session {
 pub struct AppState {
     pub cfg: Mutex<Config>,
     pub session: Mutex<Option<Session>>,
+    /// The speech-to-text server this app started itself, when the user asked
+    /// it to run a model on this machine. Holding it here is what ties its
+    /// lifetime to the app's: dropping the slot kills the process.
+    pub engine: Mutex<Option<crate::engine::EngineProcess>>,
     pub history: Mutex<Vec<Entry>>,
     /// What the last dictation typed, so "scratch that" knows how much to delete.
     pub last: Mutex<Option<String>>,
@@ -104,6 +108,7 @@ impl AppState {
         Self {
             cfg: Mutex::new(cfg),
             session: Mutex::new(None),
+            engine: Mutex::new(None),
             history: Mutex::new(load_history()),
             last: Mutex::new(None),
             speaking: AtomicBool::new(false),

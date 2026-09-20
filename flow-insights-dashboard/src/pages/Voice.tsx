@@ -1,5 +1,6 @@
 import { Plus, Volume2 } from 'lucide-react';
 
+import { ModelField } from '@/components/ModelField';
 import {
   Button,
   Card,
@@ -14,8 +15,10 @@ import {
 } from '@/components/ui';
 import * as api from '@/lib/api';
 import { LANGUAGES, STT_MODELS, TTS_VOICES, languageLabel } from '@/lib/deepgram-catalog';
+import { languagesFor } from '@/lib/languages';
 import { ASSEMBLYAI_LANGUAGES } from '@/lib/translate-catalog';
 import { useStore } from '@/store';
+
 
 /**
  * Which ears and which mouth the app uses.
@@ -40,7 +43,7 @@ function optionsWith(pairs: [string, string][], current: string, describe: boole
 }
 
 export default function VoicePage() {
-  const { config, mics, fail, update } = useStore();
+  const { config, status, mics, fail, update } = useStore();
   if (!config) return null;
 
   const cycle = config.language_cycle;
@@ -48,6 +51,12 @@ export default function VoicePage() {
   // choose those for themselves, so showing the pickers would be a lie.
   const deepgram = config.provider === 'deepgram';
   const assemblyai = config.provider === 'assemblyai';
+  // A server the user points at takes a model and a language; the two that
+  // keep the model out of the request have neither to offer here.
+  const provider = status?.providers.find((p) => p.value === config.provider);
+  const selfHosted = provider?.self_hosted ?? false;
+  const namesItsModel = provider?.has_model_list ?? false;
+  const hasLanguage = provider?.has_language ?? false;
 
   // AssemblyAI steers towards one of eighteen languages and ignores the rest,
   // so its picker offers only those — and "automatic" for no steering at all,
@@ -120,6 +129,41 @@ export default function VoicePage() {
               )}
             </div>
           </div>
+        ) : selfHosted ? (
+          <div className="flex flex-col gap-4">
+            {namesItsModel ? (
+              <ModelField
+                id="local-model"
+                value={config.local_model}
+                placeholder="whisper-large-v3"
+                url={config.local_base_url}
+                apiKey={config.local_key}
+                help="Which model the server should transcribe with. Fetch models lists what it has; left empty, it uses whatever it was started with."
+                onChange={(local_model) => update({ local_model })}
+              />
+            ) : (
+              <p className="text-[12px] text-muted">
+                {config.provider === 'orra'
+                  ? 'The model is the one running on this machine — pick a different one under Settings → Transcription service.'
+                  : 'This server transcribes with the model it was started with, so there is none to name here.'}
+              </p>
+            )}
+            <div>
+              <Label htmlFor="language">Language</Label>
+              <Select
+                id="language"
+                value={config.language}
+                onChange={(e) => update({ language: e.target.value })}
+              >
+                {optionsWith(languagesFor(config.provider), config.language, true)}
+              </Select>
+              <p className="text-[12px] text-muted mt-1.5">
+                A hint, not a filter: a whisper model detects the language on its own, and picking
+                one mostly saves it the guesswork. The spoken commands and replacements further down
+                this page are English words either way.
+              </p>
+            </div>
+          </div>
         ) : (
           <p className="text-[12px] text-muted">
             <strong>{api.providerLabel(config.provider)}</strong> chooses its own model and language,
@@ -145,7 +189,9 @@ export default function VoicePage() {
           )}
         </div>
 
-        {deepgram && (
+        {/* Shown wherever a language means something: these are what the switch
+            key steps through, and the first one is where a fresh setup starts. */}
+        {hasLanguage && (
           <>
             <Divider />
 
@@ -153,9 +199,9 @@ export default function VoicePage() {
               label="Languages to switch between"
               sub={
                 <>
-                  The language key steps through these. Deepgram has no auto-detect on a live
-                  stream, so a switch has to be a keystroke rather than something it infers — add
-                  the codes you actually dictate in, such as <code>fa</code> for Persian.
+                  The language key steps through these. Add the codes you actually dictate in, such
+                  as <code>en</code> for English or <code>fa</code> for Persian, and switch between
+                  them with the key rather than through settings.
                 </>
               }
             />
@@ -244,7 +290,13 @@ export default function VoicePage() {
           </>
         ) : (
           <>
-            Currently transcribing with <strong>{api.providerLabel(config.provider)}</strong>.
+            Currently transcribing with{' '}
+            <strong>
+              {selfHosted && config.local_model
+                ? `${config.local_model} on ${api.providerLabel(config.provider)}`
+                : api.providerLabel(config.provider)}
+            </strong>
+            .
           </>
         )}
       </p>

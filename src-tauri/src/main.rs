@@ -6,10 +6,12 @@ mod audio;
 mod commands;
 mod config;
 mod deepgram;
+mod engine;
 mod gemini;
 mod hotkeys;
 mod hypr;
 mod inject;
+mod local;
 mod polish;
 mod problem;
 mod state;
@@ -77,6 +79,11 @@ fn main() {
             commands::set_language,
             commands::verify_key,
             commands::verify_translate,
+            commands::list_models,
+            commands::local_availability,
+            commands::download_local_model,
+            commands::use_local_model,
+            commands::stop_local_engine,
             commands::apply_hotkey,
             commands::show_main,
             commands::quit,
@@ -105,6 +112,11 @@ fn main() {
             if cfg.launch_at_login {
                 let _ = commands::set_launch_at_login(true);
             }
+
+            // Bring up the local model this app is responsible for, if any. On
+            // its own thread: starting it means loading the weights, which is
+            // long enough that the window should not wait for it.
+            engine::start_configured(handle.clone());
 
             spawn_control_server(handle, port, token);
             Ok(())

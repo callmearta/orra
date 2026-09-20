@@ -264,10 +264,14 @@ fn redact(text: &str, cfg: &Config) -> String {
 /// the one that actually appears in a message. And in both spellings, because
 /// Gemini's key is percent-encoded into the URL it is sent in.
 fn secrets(cfg: &Config) -> Vec<String> {
-    let mut out: Vec<String> = [Provider::Deepgram, Provider::AssemblyAi, Provider::Gemini]
-        .into_iter()
-        .filter_map(|p| cfg.key_for(p))
-        .collect();
+    // The local provider's key is in here for the same reason as the rest: it is
+    // one field the user could have pasted a real OpenAI or Groq key into, and a
+    // request to a server that refuses it quotes it back.
+    let mut out: Vec<String> =
+        [Provider::Deepgram, Provider::AssemblyAi, Provider::Gemini, Provider::Local]
+            .into_iter()
+            .filter_map(|p| cfg.key_for(p))
+            .collect();
     out.push(cfg.translate_api_key.clone());
     out.push(cfg.token.clone());
 

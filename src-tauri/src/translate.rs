@@ -192,7 +192,10 @@ pub fn translate_openai(
 /// An endpoint's own words about what went wrong. Every OpenAI-compatible
 /// server puts the reason at `/error/message`; anything else — an HTML error
 /// page from a proxy in the way, say — is at least worth a short snippet.
-fn complaint(body: &[u8]) -> String {
+///
+/// Shared with the local transcription provider, which talks to the same kind
+/// of endpoint and owes the user the same explanation.
+pub(crate) fn complaint(body: &[u8]) -> String {
     if let Ok(v) = serde_json::from_slice::<Value>(body) {
         if let Some(m) = v.pointer("/error/message").and_then(Value::as_str) {
             return m.to_string();

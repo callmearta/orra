@@ -13,8 +13,9 @@ use crate::stt::{Flow, Session, Wire};
 
 pub const WIRE: Wire = Wire {
     // All the configuration is in the URL, as with Deepgram.
-    handshake: &[],
+    handshake: |_| Vec::new(),
     awaits_handshake: false,
+    flush: crate::stt::FLUSH_TIMEOUT,
     // Closing the socket as soon as this goes out would discard the last
     // transcript: the server flushes the open turn first and answers with a
     // `Termination` message, which is what `decode` waits for.
