@@ -1,6 +1,6 @@
 pkgbase = orra
 	pkgdesc = Hold a key, speak, and the words are typed into whatever window has focus
-	pkgver = 0.1.3
+	pkgver = 0.1.4
 	pkgrel = 1
 	url = https://github.com/callmearta/orra
 	arch = x86_64
@@ -14,10 +14,10 @@ pkgbase = orra
 	depends = webkit2gtk-4.1
 	depends = gtk3
 	options = !lto
-	source = orra-0.1.3.tar.gz::https://github.com/callmearta/orra/archive/refs/tags/v0.1.3.tar.gz
+	source = orra-0.1.4.tar.gz::https://github.com/callmearta/orra/archive/refs/tags/v0.1.4.tar.gz
 	source = orra.desktop
 	source = LICENSE
-	sha256sums = 6ca09698c2a2a227a3937bb57bef4c1cb00119dab709f58cb503047e59fc0ca4
+	sha256sums = e57a2a18153a14782d0d1f1a82dbab1484bf4ab3ee11e0bc2528a8a7a0eb6fc5
 	sha256sums = SKIP
 	sha256sums = SKIP
 
