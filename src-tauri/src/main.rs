@@ -180,6 +180,13 @@ fn build_hud(app: &AppHandle, visible: bool) -> tauri::Result<()> {
         .resizable(false)
         .shadow(false)
         .focused(false)
+        // `focused(false)` only skips the focus it would take as it is created.
+        // Showing it again for each dictation would still activate it, and an
+        // overlay that takes focus takes the paste target with it — the same
+        // thing the `no_focus` rule exists to prevent on Hyprland. Windows is
+        // the only platform that honours this; elsewhere it is a no-op and the
+        // compositor rule or window manager does the job.
+        .focusable(false)
         .visible(false)
         .build()?;
 
@@ -237,6 +244,59 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Put the overlay at the bottom centre of the screen being worked on.
+///
+/// Hyprland is told where to put it by a window rule; every other platform
+/// leaves the toolkit's default placement, which drops the overlay wherever the
+/// window manager happens to cascade it — nowhere near the bottom, and on a
+/// second monitor not even on the right screen.
+///
+/// The cursor decides which screen. It is where the user's attention already
+/// is, it is the screen the dictation is going into, and unlike the app's own
+/// window it is meaningful even when the settings window is closed and only the
+/// tray is left.
+///
+/// Every coordinate here is a physical pixel: `Monitor::size`,
+/// `Monitor::position`, `outer_size` and `set_position` all speak that, so no
+/// scale factor is needed to mix them. The margin and the pill height are the
+/// exception — they are logical, because the pill is drawn by the webview in
+/// CSS pixels — so they are scaled to match. This is the same arithmetic as the
+/// Hyprland rule, which gets away with the unscaled numbers because Hyprland's
+/// own coordinate space is logical too.
+fn place_hud(app: &AppHandle, hud: &tauri::WebviewWindow) {
+    let monitor = app
+        .cursor_position()
+        .ok()
+        .and_then(|p| app.monitor_from_point(p.x, p.y).ok().flatten())
+        .or_else(|| hud.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten());
+    let (Some(monitor), Ok(size)) = (monitor, hud.outer_size()) else {
+        return;
+    };
+
+    let (x, y) = hud_origin(
+        (monitor.position().x, monitor.position().y),
+        (monitor.size().width, monitor.size().height),
+        (size.width, size.height),
+        monitor.scale_factor(),
+    );
+    let _ = hud.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
+/// The overlay's top-left corner, in physical pixels.
+///
+/// The window is far taller than the pill drawn inside it, and the pill sits
+/// centred in whatever it got, so centring the *window* on where the pill's
+/// centre belongs is what puts the pill on the margin.
+fn hud_origin(monitor: (i32, i32), screen: (u32, u32), win: (u32, u32), scale: f64) -> (i32, i32) {
+    let lift =
+        ((hypr::HUD_BOTTOM_MARGIN as f64 + hypr::HUD_PILL_H as f64 / 2.0) * scale).round() as i32;
+    (
+        monitor.0 + (screen.0 as i32 - win.0 as i32) / 2,
+        monitor.1 + screen.1 as i32 - lift - win.1 as i32 / 2,
+    )
+}
+
 /// Show the HUD for exactly as long as the key is held.
 ///
 /// Releasing it takes the overlay away at once — the rest of the dictation is
@@ -255,17 +315,18 @@ fn watch_state_for_hud(app: &AppHandle) {
 
         if phase == "recording" {
             let _ = hud.show();
+            // On Hyprland where it appears is the compositor's business — the
+            // window rule written by `hotkeys::sync` positions it as it opens,
+            // and moving it afterwards would map it centred and then jump. No
+            // other platform has a rule to write, so there the app places it.
+            if !config::is_hyprland() {
+                place_hud(&handle, &hud);
+            }
             // The window is mostly transparent slack around the pill, and without
             // this the invisible part would intercept clicks aimed at whatever is
             // behind it. It has to come after the first show: on Wayland tao
             // panics on an unrealised window (`window.window().unwrap()`), and the
             // overlay is created hidden.
-            //
-            // Where it appears is the compositor's business — the window rule
-            // written by `hotkeys::sync` positions it as it opens. Nothing here
-            // should move it afterwards: doing that means it is mapped centred and
-            // then jumps, which is visible, and it needs coordinate arithmetic the
-            // app has no reliable way to do across display scaling.
             let _ = hud.set_ignore_cursor_events(true);
         } else {
             // Both of the other phases: the key is already up.
@@ -393,4 +454,44 @@ fn handle_ctl(app: AppHandle, mut stream: TcpStream, token: &str) {
         other => format!("err: unknown command {other:?}"),
     };
     let _ = writeln!(stream, "{reply}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The point of the arithmetic: wherever the screen is and however it is
+    /// scaled, the pill's bottom edge ends up `HUD_BOTTOM_MARGIN` above the
+    /// screen's bottom edge. The pill is centred in the window and the window
+    /// height cancels out of that sum, which is what makes the oversized
+    /// webview window harmless.
+    #[test]
+    fn the_pill_lands_on_the_bottom_margin() {
+        let win = (200, 290);
+        for (screen, scale) in [
+            ((1920u32, 1080u32), 1.0),
+            ((3840, 2160), 2.0),
+            ((2560, 1440), 1.5),
+        ] {
+            let (_, y) = hud_origin((0, 0), screen, win, scale);
+            // Pill centre is the window centre; its bottom is half a pill below.
+            let pill_bottom = y + win.1 as i32 / 2 + (hypr::HUD_PILL_H as f64 * scale / 2.0) as i32;
+            let want = screen.1 as i32 - (hypr::HUD_BOTTOM_MARGIN as f64 * scale) as i32;
+            assert!(
+                (pill_bottom - want).abs() <= 1,
+                "screen {screen:?} at {scale}x put the pill at {pill_bottom}, wanted {want}"
+            );
+        }
+    }
+
+    /// Centred horizontally, and offset by the monitor's own origin — a second
+    /// screen to the left of the primary has a negative x, and the overlay has
+    /// to follow it there rather than sit on the primary.
+    #[test]
+    fn the_overlay_follows_the_monitor_it_is_on() {
+        let win = (200, 290);
+        assert_eq!(hud_origin((0, 0), (1920, 1080), win, 1.0).0, 860);
+        assert_eq!(hud_origin((-1920, 0), (1920, 1080), win, 1.0).0, -1060);
+        assert_eq!(hud_origin((1920, 0), (1920, 1080), win, 1.0).0, 2780);
+    }
 }

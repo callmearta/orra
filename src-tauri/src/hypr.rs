@@ -114,12 +114,16 @@ hl.bind({translate_key}, hl.dsp.exec_cmd({}), {{ release = true, description = "
 }
 
 /// How far the pill floats above the bottom edge of the monitor, in pixels.
-const HUD_BOTTOM_MARGIN: i64 = 120;
+///
+/// Logical pixels, like everything else in CSS and in Hyprland's coordinate
+/// space. `place_hud` in main.rs scales them for the platforms where the app
+/// has to position the overlay itself.
+pub const HUD_BOTTOM_MARGIN: i64 = 120;
 
 /// The pill's own height, as drawn by hud.html. The window around it is much
 /// bigger (the toolkit will not make a webview window smaller), so the window
 /// has to be lifted by the difference to put the pill where this margin says.
-const HUD_PILL_H: i64 = 24;
+pub const HUD_PILL_H: i64 = 24;
 
 /// Floating, pinned, never-focused overlay, positioned by the compositor.
 ///
