@@ -68,23 +68,23 @@ and rpm, and a Windows installer. Grab the one for your system from
 **Debian / Ubuntu**
 
 ```bash
-sudo apt install ./Orra_0.1.0_amd64.deb
+sudo apt install ./Orra_0.1.1_amd64.deb
 ```
 
 **Fedora / RHEL**
 
 ```bash
-sudo dnf install ./Orra-0.1.0-1.x86_64.rpm
+sudo dnf install ./Orra-0.1.1-1.x86_64.rpm
 ```
 
 **Any Linux, no install**
 
 ```bash
-chmod +x Orra_0.1.0_amd64.AppImage
-./Orra_0.1.0_amd64.AppImage
+chmod +x Orra_0.1.1_amd64.AppImage
+./Orra_0.1.1_amd64.AppImage
 ```
 
-**Windows** — run the `Orra_0.1.0_x64-setup.exe` installer.
+**Windows** — run the `Orra_0.1.1_x64-setup.exe` installer.
 
 The deb and rpm declare `wtype` and `wl-clipboard` as dependencies, so your
 package manager should pull them in. On Arch, `sudo pacman -S wtype wl-clipboard`;
@@ -407,7 +407,7 @@ Pushing a tag matching the version in `src-tauri/tauri.conf.json` builds every
 platform and publishes them to one GitHub Release:
 
 ```bash
-git tag v0.1.0 && git push origin v0.1.0
+git tag v0.1.1 && git push origin v0.1.1
 ```
 
 Bump the version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and
