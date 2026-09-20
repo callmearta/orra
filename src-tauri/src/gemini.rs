@@ -111,10 +111,14 @@ fn decode(raw: &str, session: &mut Session) -> Flow {
 /// made for.
 pub fn verify_key(key: &str) -> Result<String> {
     let resp = ureq::get("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200")
+        .config()
+        .timeout_global(Some(crate::problem::VERIFY_TIMEOUT))
+        .build()
         .header("x-goog-api-key", key)
         .call()
         .map_err(|e| match e {
             ureq::Error::StatusCode(400 | 401 | 403) => anyhow!("Gemini rejected that key ({e})"),
+            ureq::Error::Timeout(_) => anyhow!("Gemini did not answer in time"),
             other => anyhow!("could not reach Gemini: {other}"),
         })?;
 

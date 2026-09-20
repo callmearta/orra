@@ -51,7 +51,7 @@ export function WindowChrome({
   onToggleSidebar: () => void;
   version?: string;
 }) {
-  const { notify } = useStore();
+  const { fail } = useStore();
 
   const run = async (light: (typeof LIGHTS)[number]) => {
     try {
@@ -59,7 +59,7 @@ export function WindowChrome({
     } catch (e) {
       // A refused window call means a missing permission, which is worth
       // saying out loud rather than leaving a dead button.
-      notify(`Could not ${light.key} the window: ${api.errorText(e)}`, 'err');
+      fail(api.problemOf(`Could not ${light.key} the window: ${api.errorText(e)}`));
     }
   };
 

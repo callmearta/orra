@@ -40,7 +40,7 @@ function optionsWith(pairs: [string, string][], current: string, describe: boole
 }
 
 export default function VoicePage() {
-  const { config, mics, notify, update } = useStore();
+  const { config, mics, fail, update } = useStore();
   if (!config) return null;
 
   const cycle = config.language_cycle;
@@ -226,7 +226,7 @@ export default function VoicePage() {
               try {
                 await api.speak('This is Orra reading your words back to you.');
               } catch (e) {
-                notify(api.errorText(e), 'err');
+                fail(api.problemOf(e));
               }
             }}
           >

@@ -78,6 +78,38 @@ export interface Config {
   token: string;
 }
 
+/** Mirrors `problem::Kind` in src-tauri/src/problem.rs. */
+export type ProblemKind =
+  | 'network'
+  | 'auth'
+  | 'quota'
+  | 'request'
+  | 'config'
+  | 'local'
+  | 'unknown';
+
+/**
+ * A failure, as the backend describes it.
+ *
+ * Mirrors `problem::Problem`. `detail` is the error exactly as it came back,
+ * and `log` is that plus the version and platform, ready to paste into a bug
+ * report — the backend builds it because the API keys have to be taken out
+ * before the text leaves the process.
+ */
+export interface Problem {
+  kind: ProblemKind;
+  /** The headline: what kind of failure this was. */
+  title: string;
+  /** What was being attempted, in plain words. */
+  summary: string;
+  /** What to do about it. */
+  advice: string;
+  /** The failure itself, verbatim. */
+  detail: string;
+  /** The whole thing, for a report. */
+  log: string;
+}
+
 /** Mirrors `commands::Status`. */
 export interface Status {
   config: Config;
@@ -206,7 +238,7 @@ export const speak = (text: string) => invoke<void>('speak', { text });
 export const stopSpeaking = () => invoke<void>('stop_speaking');
 export const cycleLanguage = () => invoke<string>('cycle_language');
 export const verifyKey = () => invoke<string>('verify_key');
-/** Checks the custom translation endpoint, if that is what is configured. */
+/** Checks the configured translation service by translating a short phrase. */
 export const verifyTranslate = () => invoke<string>('verify_translate');
 export const applyHotkey = () => invoke<string>('apply_hotkey');
 export const reinject = (id: string) => invoke<void>('reinject', { id });
@@ -219,4 +251,25 @@ export function errorText(e: unknown): string {
   if (typeof e === 'string') return e;
   if (e instanceof Error) return e.message;
   return String(e);
+}
+
+/**
+ * The failure a rejected command carries, in the shape the card shows.
+ *
+ * The commands that talk to a service reject with a full `Problem`; the rest
+ * still reject with a plain string, which is wrapped here with a headline that
+ * claims nothing it cannot know. The text is its own log — there is no key in
+ * "could not minimise the window" to take out.
+ */
+export function problemOf(e: unknown): Problem {
+  if (e && typeof e === 'object' && 'log' in e && 'detail' in e) return e as Problem;
+  const text = errorText(e);
+  return {
+    kind: 'unknown',
+    title: 'Something went wrong',
+    summary: text,
+    advice: '',
+    detail: text,
+    log: text,
+  };
 }

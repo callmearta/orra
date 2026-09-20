@@ -11,6 +11,7 @@ mod hotkeys;
 mod hypr;
 mod inject;
 mod polish;
+mod problem;
 mod state;
 mod stats;
 mod stt;
@@ -21,7 +22,7 @@ use std::net::{TcpListener, TcpStream};
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{AppHandle, Emitter, Listener, Manager};
+use tauri::{AppHandle, Listener, Manager};
 
 use state::{AppState, Purpose};
 
@@ -219,7 +220,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     let app = app.clone();
                     tauri::async_runtime::spawn(async move {
                         if let Err(e) = state::start_dictation(app.clone(), Purpose::Dictate).await {
-                            let _ = app.emit(stt::EVT_ERROR, e.to_string());
+                            problem::report(&app, "Could not start dictating", e);
                         }
                     });
                 }
@@ -233,7 +234,7 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
                     .and_then(|h| h.last().map(|e| e.text.clone()));
                 if let Some(text) = last {
                     if let Err(e) = state::speak(app, text) {
-                        let _ = app.emit(stt::EVT_ERROR, e.to_string());
+                        problem::report(app, "Could not read that aloud", e);
                     }
                 }
             }

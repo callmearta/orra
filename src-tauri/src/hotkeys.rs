@@ -110,8 +110,7 @@ fn bind(
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     if let Err(e) = crate::state::start_dictation(app.clone(), purpose).await {
-                        use tauri::Emitter;
-                        let _ = app.emit(crate::stt::EVT_ERROR, e.to_string());
+                        crate::problem::report(&app, "Could not start dictating", e);
                     }
                 });
             }

@@ -206,12 +206,18 @@ fn split_sentences(text: &str) -> Vec<String> {
 
 /// Cheap round trip that proves the key is accepted, for the Settings button.
 pub fn verify_key(key: &str) -> Result<String> {
+    // Bounded, so a request that connects and then stalls fails the check
+    // instead of leaving the button saying "Checking…" until the app is closed.
     let resp = ureq::get("https://api.deepgram.com/v1/projects")
+        .config()
+        .timeout_global(Some(crate::problem::VERIFY_TIMEOUT))
+        .build()
         .header("Authorization", &format!("Token {key}"))
         .call()
         .map_err(|e| match e {
             ureq::Error::StatusCode(401) => anyhow!("Deepgram rejected that key (401)"),
             ureq::Error::StatusCode(code) => anyhow!("Deepgram returned HTTP {code}"),
+            ureq::Error::Timeout(_) => anyhow!("Deepgram did not answer in time"),
             other => anyhow!("could not reach Deepgram: {other}"),
         })?;
 

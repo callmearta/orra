@@ -5,6 +5,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::config::{self, Config, Provider};
 use crate::deepgram;
+use crate::problem::Problem;
 use crate::{assemblyai, gemini};
 use crate::hotkeys;
 use crate::inject;
@@ -184,38 +185,56 @@ pub fn set_language(app: AppHandle, code: String) -> Result<(), String> {
 }
 
 /// Check the configured provider's key against that provider.
+///
+/// Off the invoke thread: a command that is not `async` runs inline in the
+/// handler, and this one makes a network call. The call is bounded by
+/// [`crate::problem::VERIFY_TIMEOUT`], but a bounded twenty seconds spent
+/// blocking is still the whole window frozen for twenty seconds.
 #[tauri::command]
-pub fn verify_key(app: AppHandle) -> Result<String, String> {
+pub async fn verify_key(app: AppHandle) -> Result<String, Problem> {
     let cfg = app.state::<AppState>().config();
     let key = cfg.api_key().ok_or_else(|| {
-        format!("No {} API key yet. Add it to .env or paste it above.", cfg.provider.label())
+        Problem::new(
+            "No key to check",
+            format!("No {} API key yet. Add it to .env or paste it in Settings.", cfg.provider.label()),
+            &cfg,
+        )
     })?;
+
     let check = match cfg.provider {
         Provider::Deepgram => deepgram::verify_key,
         Provider::AssemblyAi => assemblyai::verify_key,
         Provider::Gemini => gemini::verify_key,
     };
-    check(&key).map_err(|e| e.to_string())
+    // Cloned because the closure below takes `cfg`, and the error paths still
+    // need it to name the failure.
+    let (summary, cert) = (format!("Checking the {} key", cfg.provider.label()), cfg.clone());
+
+    tokio::task::spawn_blocking(move || check(&key))
+        .await
+        .map_err(|e| Problem::new("The key check failed", e, &cert))?
+        .map_err(|e| Problem::new(summary, e, &cert))
 }
 
-/// Check the custom translation endpoint by asking it to translate something.
+/// Check the translation service by asking it to translate something.
 ///
-/// A real call rather than a models listing: it is the only check that covers
-/// the URL, the key and the model name together, and those are the three things
-/// that can be wrong with a hand-typed endpoint.
+/// A real call rather than a listing: it is the only check that covers the
+/// endpoint, the key and the model name together, which are the three things
+/// that can be wrong — and it is the same code path a dictation takes, so a
+/// pass here means translating will work.
 ///
-/// Off the invoke thread on purpose. A command that is not `async` runs inline
-/// in the handler, and the endpoint being tested may be a machine that accepts
-/// the connection and then says nothing — this call waits up to
-/// `translate::ENDPOINT_TIMEOUT` before giving up, and run inline that wait is
-/// the whole window frozen with no way to cancel it.
+/// Off the invoke thread for the same reason as [`verify_key`], and more so:
+/// the endpoint may be a model on this machine, where a cold load is slow, and
+/// one that accepts the connection and then says nothing waits out the full
+/// timeout.
 #[tauri::command]
-pub async fn verify_translate(app: AppHandle) -> Result<String, String> {
+pub async fn verify_translate(app: AppHandle) -> Result<String, Problem> {
     let cfg = app.state::<AppState>().config();
-    tokio::task::spawn_blocking(move || crate::translate::check_custom(&cfg))
+    let cert = cfg.clone();
+    tokio::task::spawn_blocking(move || crate::translate::check(&cfg))
         .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())
+        .map_err(|e| Problem::new("The translation check failed", e, &cert))?
+        .map_err(|e| Problem::new("Checking the translation service", e, &cert))
 }
 
 /// Write the push-to-talk bind into the Hyprland config right now.

@@ -18,13 +18,17 @@ import {
 } from 'react';
 
 import * as api from './lib/api';
-import type { Config, Entry, Insights, Phase, Status } from './lib/api';
+import type { Config, Entry, Insights, Phase, Problem, Status } from './lib/api';
 
 const SAVE_DEBOUNCE_MS = 600;
 
 export interface Banner {
   message: string;
-  kind: 'info' | 'ok' | 'err';
+  /**
+   * Only the good news. A failure goes through `fail` instead, so that it
+   * cannot be given a kind that times out.
+   */
+  kind: 'info' | 'ok';
 }
 
 interface Live {
@@ -44,7 +48,17 @@ interface Store {
   mics: string[];
   live: Live;
   banner: Banner | null;
+  /**
+   * The failure on screen, if any. Unlike the banner this does not time out:
+   * it is usually about something that happened while the user was looking
+   * somewhere else — a dictation that failed to translate — so it waits to be
+   * read, and only the close button takes it away.
+   */
+  problem: Problem | null;
   notify: (message: string, kind?: Banner['kind']) => void;
+  /** Show a failure. Stays until dismissed. */
+  fail: (problem: Problem) => void;
+  dismissProblem: () => void;
   /** Merge a change and save it once the user stops fiddling. */
   update: (patch: Partial<Config>) => void;
   /** Merge a change and save at once, for things that must apply now. */
@@ -73,21 +87,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [mics, setMics] = useState<string[]>([]);
   const [live, setLive] = useState<Live>({ phase: 'idle', final: '', interim: '', level: 0 });
   const [banner, setBanner] = useState<Banner | null>(null);
+  const [problem, setProblem] = useState<Problem | null>(null);
 
   const notify = useCallback((message: string, kind: Banner['kind'] = 'info') => {
     setBanner({ message, kind });
   }, []);
 
+  const fail = useCallback((next: Problem) => setProblem(next), []);
+  const dismissProblem = useCallback(() => setProblem(null), []);
+
   // The banner clears itself; the timer is held in a ref so a second message
-  // replaces the first cleanly instead of both timers racing.
+  // replaces the first cleanly instead of both timers racing. Failures do not
+  // come through here at all — they wait to be dismissed.
   const bannerTimer = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (!banner) return;
     window.clearTimeout(bannerTimer.current);
-    bannerTimer.current = window.setTimeout(
-      () => setBanner(null),
-      banner.kind === 'err' ? 8000 : 4000,
-    );
+    bannerTimer.current = window.setTimeout(() => setBanner(null), 4000);
     return () => window.clearTimeout(bannerTimer.current);
   }, [banner]);
 
@@ -120,12 +136,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     async (next: Config) => {
       try {
         const note = await api.saveConfig(next);
-        if (note && TROUBLE.test(note)) notify(note, 'err');
+        if (note && TROUBLE.test(note)) fail(api.problemOf(note));
       } catch (e) {
-        notify(api.errorText(e), 'err');
+        fail(api.problemOf(e));
       }
     },
-    [notify],
+    [fail, notify],
   );
 
   const update = useCallback(
@@ -200,7 +216,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             setConfig((c) => (c ? { ...c, language: payload.code } : c));
           }),
           api.listen<void>('history', () => void refreshHistory()),
-          api.listen<string>('error', (message) => notify(message, 'err')),
+          api.listen<Problem>('error', (payload) => setProblem(payload)),
           api.listen<void>('status', () => void refreshStatus()),
         ]);
         if (cancelled) {
@@ -230,7 +246,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       mics,
       live,
       banner,
+      problem,
       notify,
+      fail,
+      dismissProblem,
       update,
       updateNow,
       refreshStatus,
@@ -246,7 +265,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       mics,
       live,
       banner,
+      problem,
       notify,
+      fail,
+      dismissProblem,
       update,
       updateNow,
       refreshStatus,

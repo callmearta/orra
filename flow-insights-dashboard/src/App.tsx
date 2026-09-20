@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { Sidebar, type NavId } from '@/components/Sidebar';
-import { Banner } from '@/components/ui';
+import { Banner, ProblemCard } from '@/components/ui';
 import { WindowChrome } from '@/components/WindowChrome';
 
 import DictionaryPage from './pages/Dictionary';
@@ -18,7 +18,7 @@ function Placeholder({ message }: { message: string }) {
 }
 
 function Shell() {
-  const { ready, bootError, config, status, banner, update } = useStore();
+  const { ready, bootError, config, status, banner, problem, dismissProblem, update } = useStore();
   const [nav, setNav] = useState<NavId>('dictate');
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
@@ -72,7 +72,13 @@ function Shell() {
         {sidebarOpen && <Sidebar activeNav={nav} onNavSelect={setNav} />}
 
         <main className="flex-1 min-w-0 rounded-[20px] sm:rounded-[28px] bg-sheet p-6 sm:p-8 md:p-10 overflow-y-auto">
-          {banner && <Banner message={banner.message} kind={banner.kind} />}
+          {/* One strip at a time: a failure already on screen is the more
+              important of the two, and it stays until it is dismissed. */}
+          {problem ? (
+            <ProblemCard problem={problem} onClose={dismissProblem} />
+          ) : (
+            banner && <Banner message={banner.message} kind={banner.kind} />
+          )}
           {bootError ? (
             <Placeholder message={`Could not start the interface: ${bootError}`} />
           ) : !ready || !config ? (

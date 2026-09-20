@@ -13,15 +13,20 @@ use serde_json::{json, Value};
 
 use crate::config::{Config, Provider, TranslateProvider};
 
-/// How long the custom endpoint gets before the dictation gives up on it.
+/// How long a translation gets before the dictation gives up on it.
 ///
-/// ureq waits forever by default, and a URL someone typed can point at a
-/// machine that is switched off or a server that accepts the connection and
-/// then says nothing — an unfinished translation is a dictation that never
-/// gets typed at all, so this path gets a deadline. It is deliberately long:
-/// the endpoint may be a model on this machine, where a cold load alone can
-/// take a minute before the first token. The wait is visible as the overlay's
-/// processing state, so it does not look like nothing is happening.
+/// ureq waits forever by default, and the far end can be a URL someone typed
+/// that points at a machine which is switched off, or a server that accepts the
+/// connection and then says nothing — an unfinished translation is a dictation
+/// that never gets typed at all, where a failed one still types the words that
+/// were spoken. Deliberately long: the service may be a model on this machine,
+/// where a cold load alone can take a minute before the first token. The wait
+/// is visible as the overlay's processing state, so it does not look like
+/// nothing is happening.
+///
+/// The Settings check takes the same path with [`crate::problem::VERIFY_TIMEOUT`
+/// ] instead — nobody is waiting on a dictation, but somebody is waiting on a
+/// button.
 const ENDPOINT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// What the model is asked for. Translation only — no summaries, no answers,
@@ -38,6 +43,14 @@ fn prompt(target: &str, text: &str) -> String {
 /// Translate `text` into the configured language. Blocking — call it from a
 /// worker thread.
 pub fn run(text: &str, cfg: &Config) -> Result<String> {
+    // Patient here: the alternative to a slow translation is a dictation that
+    // never gets typed at all.
+    run_into(text, &cfg.translate_language, cfg, ENDPOINT_TIMEOUT)
+}
+
+/// The dispatch a dictation and the Settings check share, so what the check
+/// proves is exactly what a dictation will do.
+fn run_into(text: &str, language: &str, cfg: &Config, timeout: Duration) -> Result<String> {
     match cfg.translate_provider {
         TranslateProvider::Gemini => {
             let key = cfg.key_for(Provider::Gemini).ok_or_else(|| {
@@ -45,29 +58,40 @@ pub fn run(text: &str, cfg: &Config) -> Result<String> {
                     "Translating uses Gemini. Add GEMINI_API_KEY to .env or paste it in Settings."
                 )
             })?;
-            translate(&key, &cfg.translate_model, &cfg.translate_language, text)
+            translate(&key, &cfg.translate_model, language, text, timeout)
         }
         TranslateProvider::Custom => translate_openai(
             &cfg.translate_base_url,
             &cfg.translate_api_key,
             &cfg.translate_custom_model,
-            &cfg.translate_language,
+            language,
             text,
+            timeout,
         ),
     }
 }
 
-/// Ask the custom endpoint for a throwaway translation, so a wrong URL, key or
-/// model name is found in Settings rather than halfway through a dictation.
-pub fn check_custom(cfg: &Config) -> Result<String> {
-    let out = translate_openai(
-        &cfg.translate_base_url,
-        &cfg.translate_api_key,
-        &cfg.translate_custom_model,
-        "en",
-        "hello",
-    )?;
-    Ok(format!("Endpoint answered — it translated a test phrase to {out:?}"))
+/// Ask the configured service for a throwaway translation, so a wrong key,
+/// model or endpoint is found in Settings rather than halfway through a
+/// dictation.
+///
+/// English in, English out — whatever the user translates *into*. The target
+/// has to be pinned for that to hold, and it is the whole point: translating
+/// into the user's own language made a working setup report itself broken for
+/// anyone not translating into English, which is most of the people who would
+/// press this.
+///
+/// That also makes it the only way to check a Gemini key used for translating
+/// and nothing else: the transcription card's check only ever looks at the
+/// provider that transcribes.
+pub fn check(cfg: &Config) -> Result<String> {
+    // Impatient, unlike a dictation: someone is watching this button, and a
+    // check that never answers has no error to show and nothing to report.
+    let out = run_into("hello", "en", cfg, crate::problem::VERIFY_TIMEOUT)?;
+    // What came back is shown rather than judged. Every way this can be wrong —
+    // a bad URL, key or model — fails before there is a reply at all, and a
+    // model that answers "hi" is a working model.
+    Ok(format!("It works — the service returned {out:?}"))
 }
 
 /// The `/chat/completions` URL for a base URL.
@@ -91,6 +115,7 @@ pub fn translate_openai(
     model: &str,
     language: &str,
     text: &str,
+    timeout: Duration,
 ) -> Result<String> {
     let base = base_url.trim();
     if base.is_empty() {
@@ -106,7 +131,7 @@ pub fn translate_openai(
 
     let mut req = ureq::post(&chat_url(base))
         .config()
-        .timeout_global(Some(ENDPOINT_TIMEOUT))
+        .timeout_global(Some(timeout))
         // The endpoint's own complaint is in the body; a bare status code says
         // nothing about which of the three settings is wrong.
         .http_status_as_error(false)
@@ -183,13 +208,25 @@ fn complaint(body: &[u8]) -> String {
 }
 
 /// Translate with a named Gemini model into a language code.
-pub fn translate(key: &str, model: &str, language: &str, text: &str) -> Result<String> {
+pub fn translate(
+    key: &str,
+    model: &str,
+    language: &str,
+    text: &str,
+    timeout: Duration,
+) -> Result<String> {
     let model = model.trim();
     let url = format!(
         "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
     );
 
+    // Bounded like the custom path. ureq waits forever by default, and a
+    // translation that never comes back is worse than one that fails: the
+    // failure types the words the user actually said, the hang types nothing.
     let resp = ureq::post(&url)
+        .config()
+        .timeout_global(Some(timeout))
+        .build()
         .header("x-goog-api-key", key)
         .header("Content-Type", "application/json")
         .send_json(json!({
@@ -340,6 +377,7 @@ mod tests {
             "gpt-4o-mini",
             "en",
             "سلام",
+            Duration::from_secs(10),
         )
         .expect("the stub answered");
         // Only the reply's text, trimmed: anything else is typed out verbatim.
@@ -367,7 +405,58 @@ mod tests {
         assert_eq!(complaint(b""), "no reason given");
     }
 
-    /// Ignored by default — needs the network and an OpenAI-compatible endpoint.
+    /// The Settings check must translate into English whatever the user translates
+/// *into*, or every model answers correctly and the check calls it a failure.
+///
+/// This went wrong once by passing the user's own language through, so it is
+/// pinned here against a stub rather than left to a live endpoint: the request
+/// that goes out is what is asserted on, not the reply.
+#[test]
+fn the_check_translates_into_english_whatever_the_user_translates_into() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let server = std::thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        sock.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 4096];
+        while let Ok(n) = sock.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..n]);
+        }
+        let body = r#"{"choices":[{"message":{"content":"hello"}}]}"#;
+        let _ = write!(
+            sock,
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        String::from_utf8_lossy(&request).to_lowercase()
+    });
+
+    let cfg = Config {
+        translate_provider: TranslateProvider::Custom,
+        translate_base_url: format!("http://127.0.0.1:{port}/v1"),
+        translate_custom_model: "test-model".into(),
+        // The case that broke: anything that is not English.
+        translate_language: "fa".into(),
+        ..Config::default()
+    };
+
+    let note = check(&cfg).expect("the stub answered");
+    println!("{note}");
+
+    let request = server.join().unwrap();
+    assert!(request.contains("into english"), "asked for the wrong language: {request}");
+    assert!(!request.contains("persian"), "the user's own language leaked in: {request}");
+}
+
+/// Ignored by default — needs the network and an OpenAI-compatible endpoint.
     /// Run with:
     ///   `ORRA_TEST_BASE_URL=... ORRA_TEST_API_KEY=... ORRA_TEST_MODEL=... \
     ///    cargo test translate_openai -- --ignored --nocapture`
@@ -378,7 +467,14 @@ mod tests {
         let key = std::env::var("ORRA_TEST_API_KEY").unwrap_or_default();
         let model = std::env::var("ORRA_TEST_MODEL").expect("ORRA_TEST_MODEL must be set");
 
-        let out = translate_openai(&base, &key, &model, "en", "سلام، این یک آزمایش است.\nخط دوم.")
+        let out = translate_openai(
+            &base,
+            &key,
+            &model,
+            "en",
+            "سلام، این یک آزمایش است.\nخط دوم.",
+            Duration::from_secs(60),
+        )
             .expect("translation failed");
         println!("translated: {out:?}");
         assert!(out.to_lowercase().contains("hello") || out.to_lowercase().contains("test"));
@@ -395,7 +491,13 @@ mod tests {
 
         // Through the same entry point the app uses, so the prompt and the
         // response parsing are both covered.
-        let out = translate(&key, &cfg.translate_model, "en", "سلام، این یک آزمایش است.\nخط دوم.")
+        let out = translate(
+            &key,
+            &cfg.translate_model,
+            "en",
+            "سلام، این یک آزمایش است.\nخط دوم.",
+            Duration::from_secs(60),
+        )
             .expect("translation failed");
         println!("translated: {out:?}");
 

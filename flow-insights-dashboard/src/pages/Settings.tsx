@@ -30,7 +30,7 @@ const PROVIDER_BLURB: Record<api.Provider, string> = {
 };
 
 export default function SettingsPage() {
-  const { config, status, notify, update, updateNow } = useStore();
+  const { config, status, notify, fail, update, updateNow } = useStore();
   const [keyStatus, setKeyStatus] = useState<string | null>(null);
   const [translateStatus, setTranslateStatus] = useState<string | null>(null);
   const [quitting, setQuitting] = useState(false);
@@ -108,7 +108,7 @@ export default function SettingsPage() {
               try {
                 notify(await api.applyHotkey(), 'ok');
               } catch (e) {
-                notify(api.errorText(e), 'err');
+                fail(api.problemOf(e));
               }
             }}
           >
@@ -236,8 +236,12 @@ export default function SettingsPage() {
                 setKeyStatus(message);
                 notify(`${api.providerLabel(config.provider)} key verified`, 'ok');
               } catch (e) {
-                setKeyStatus(api.errorText(e));
-                notify(api.errorText(e), 'err');
+                // Cleared rather than filled in: the card above carries the
+                // whole failure, and this line would only repeat its summary —
+                // which for this command is the static "Checking the … key",
+                // reading as though the check were still running.
+                setKeyStatus(null);
+                fail(api.problemOf(e));
               }
             }}
           >
@@ -316,7 +320,11 @@ export default function SettingsPage() {
               className="w-auto"
               aria-label="Translation model"
               value={config.translate_model}
-              onChange={(e) => update({ translate_model: e.target.value })}
+              onChange={(e) => {
+                // A different model is a different thing to check.
+                setTranslateStatus(null);
+                update({ translate_model: e.target.value });
+              }}
             >
               {TRANSLATE_MODELS.map(([id, label]) => (
                 <option key={id} value={id}>
@@ -377,34 +385,41 @@ export default function SettingsPage() {
                 }}
               />
             </div>
-
-            <div className="flex items-center gap-3">
-              <Button
-                onClick={async () => {
-                  setTranslateStatus('Asking the endpoint…');
-                  try {
-                    // The fields above save on a debounce, so a Test clicked
-                    // straight after typing would otherwise check the values
-                    // from before. An empty patch writes what is on screen now.
-                    await updateNow({});
-                    const message = await api.verifyTranslate();
-                    setTranslateStatus(message);
-                    notify('Translation endpoint answered', 'ok');
-                  } catch (e) {
-                    setTranslateStatus(api.errorText(e));
-                    notify(api.errorText(e), 'err');
-                  }
-                }}
-              >
-                <ShieldCheck className="w-4 h-4" />
-                Test endpoint
-              </Button>
-              <span className="text-[12px] text-muted">
-                {translateStatus ?? 'Sends one short phrase through the endpoint you configured.'}
-              </span>
-            </div>
           </>
         )}
+
+        {/* Shown for either service: translating is the one thing here that can
+            be configured and still not work, and a Gemini key used only for
+            translating has no other way to be checked — the button in the
+            transcription card only ever tests the provider that transcribes. */}
+        <div className="flex items-center gap-3">
+          <Button
+            onClick={async () => {
+              setTranslateStatus('Translating a test phrase…');
+              try {
+                // The fields above save on a debounce, so a check clicked
+                // straight after typing would otherwise test the values from
+                // before. An empty patch writes what is on screen now.
+                await updateNow({});
+                const message = await api.verifyTranslate();
+                setTranslateStatus(message);
+                notify('Translation is working', 'ok');
+              } catch (e) {
+                // As above: the card carries it, and the summary here would be
+                // the static "Checking the translation service".
+                setTranslateStatus(null);
+                fail(api.problemOf(e));
+              }
+            }}
+          >
+            <ShieldCheck className="w-4 h-4" />
+            Test translation
+          </Button>
+          <span className="text-[12px] text-muted">
+            {translateStatus ??
+              'Translates one short phrase, so a wrong key, model or URL is found here.'}
+          </span>
+        </div>
 
         <p className="text-[12px] text-muted">
           Translation is one extra round trip after you finish speaking, which is why it has a key

@@ -7,7 +7,7 @@ import { duration, num, prettifyApp, timeAgo } from '@/lib/stats';
 import { useStore } from '@/store';
 
 export default function TranscriptsPage() {
-  const { history, notify, refreshHistory } = useStore();
+  const { history, notify, fail, refreshHistory } = useStore();
   const [confirmingClear, setConfirmingClear] = useState(false);
 
   const totalWords = history.reduce((n, e) => n + e.words, 0);
@@ -17,7 +17,7 @@ export default function TranscriptsPage() {
       await action();
       if (what) notify(what, 'ok');
     } catch (e) {
-      notify(api.errorText(e), 'err');
+      fail(api.problemOf(e));
     }
   };
 

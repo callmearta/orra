@@ -167,15 +167,29 @@ provider is transcribing. It can also run against **any OpenAI-compatible
 endpoint** — OpenAI, OpenRouter, Groq, or a model on your own machine — by
 setting the service to *Custom endpoint* and giving it an API URL, a model name
 and a key (a local server usually wants no key). The URL is the base one,
-ending at `/v1`; `/chat/completions` is appended to it. **Test endpoint** sends
-one short phrase through it, so a wrong URL or model name is found in Settings
-rather than mid-dictation.
+ending at `/v1`; `/chat/completions` is appended to it. **Test translation**
+sends one short phrase through whatever is configured — including Gemini, which
+is the only way to check a Gemini key that is used for translating and not for
+transcribing — so a wrong key, model or URL is found in Settings rather than
+mid-dictation.
 
 Translation is one extra round trip after you stop speaking, which is why it
 has a key of its own rather than being something every dictation waits for.
 If it fails, the words you actually said are typed instead and the reason is
 shown. The history entry keeps both: the translation as the dictation, and the
 original underneath it.
+
+### When something fails
+
+A failure is shown as a card at the top of the window, and it stays there until
+you close it — the failures that matter happen while you are looking at another
+window, so it is not something to miss in four seconds.
+
+It leads with what kind of failure it was (`Could not reach the service`, `The
+API key was refused`, `Not set up yet`) and what to do about it, then the error
+itself. **Copy log** puts all of that plus the version and the platform on the
+clipboard, which is what to send with a bug report. API keys are stripped out
+of it before it is shown or copied, so it is safe to paste.
 
 ### Read aloud
 
@@ -463,6 +477,7 @@ src-tauri/src/
   audio.rs       microphone capture (cpal) and playback (rodio)
   polish.rs      transcript → typed text: fillers, voice commands, replacements
   translate.rs   translation: Gemini, or any OpenAI-compatible endpoint
+  problem.rs     a failure as the user sees it: kind, advice, and the log to send
   inject.rs      clipboard and keystroke delivery, per platform
   hotkeys.rs     global shortcuts; defers to hypr.rs on Hyprland
   hypr.rs        the managed Lua blocks and the overlay's window rule
@@ -544,7 +559,8 @@ first — see [Building from source](#building-from-source).
   `~/.config/orra/` — no telemetry, no analytics, no accounts.
 - **API keys** are read from the environment or a `.env`, or stored in plain text
   in `config.json` if you paste them into Settings. `.env` is gitignored; keep it
-  that way.
+  that way. Keys are stripped out of the error log that **Copy log** puts on the
+  clipboard, because that text is meant to be sent to someone.
 - **The control socket** listens on `127.0.0.1` only and requires a shared token,
   generated on first run into `config.json`, so unrelated local processes cannot
   make the app type.

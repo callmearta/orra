@@ -266,7 +266,7 @@ pub fn start(
         let socket = match socket {
             Ok((socket, _)) => socket,
             Err(e) => {
-                let _ = app.emit(EVT_ERROR, e.to_string());
+                crate::problem::report(&app, "Could not start the transcription service", &e);
                 crate::state::abandon_dictation(&app, id);
                 return;
             }
@@ -330,7 +330,11 @@ pub fn start(
                         Some(Ok(Message::Binary(b))) => String::from_utf8(b.to_vec()).ok(),
                         Some(Ok(Message::Close(_))) | None => break,
                         Some(Err(e)) => {
-                            let _ = app.emit(EVT_ERROR, format!("stream error: {e}"));
+                            crate::problem::report(
+                                &app,
+                                "The transcription service dropped the connection",
+                                format!("stream error: {e}"),
+                            );
                             break;
                         }
                         _ => None,
@@ -345,7 +349,14 @@ pub fn start(
                 // A provider that never acknowledged its handshake would leave
                 // this waiting forever with audio piling up behind it.
                 _ = &mut connect_deadline, if !session.ready => {
-                    let _ = app.emit(EVT_ERROR, "the transcription service never started");
+                    crate::problem::report(
+                        &app,
+                        "The transcription service never answered",
+                        // Worded as the other deadline is: `problem::Kind` reads
+                        // it to decide the headline, and "no response within 10s"
+                        // said nothing it recognised.
+                        format!("did not answer within {}s", CONNECT_TIMEOUT.as_secs()),
+                    );
                     crate::state::abandon_dictation(&app, id);
                     return;
                 }

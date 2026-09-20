@@ -7,7 +7,7 @@ import { num } from '@/lib/stats';
 import { useStore } from '@/store';
 
 export default function DictatePage({ onOpenSettings }: { onOpenSettings: () => void }) {
-  const { config, status, insights, history, live, notify } = useStore();
+  const { config, status, insights, history, live, notify, fail } = useStore();
   if (!config) return null;
 
   const recording = live.phase === 'recording';
@@ -20,7 +20,7 @@ export default function DictatePage({ onOpenSettings }: { onOpenSettings: () => 
     try {
       await (recording ? api.stopDictation() : api.startDictation());
     } catch (e) {
-      notify(api.errorText(e), 'err');
+      fail(api.problemOf(e));
     }
   };
 
@@ -30,7 +30,7 @@ export default function DictatePage({ onOpenSettings }: { onOpenSettings: () => 
     try {
       await api.speak(latest.text);
     } catch (e) {
-      notify(api.errorText(e), 'err');
+      fail(api.problemOf(e));
     }
   };
 
@@ -38,7 +38,7 @@ export default function DictatePage({ onOpenSettings }: { onOpenSettings: () => 
     try {
       notify(`Language: ${languageLabel(await api.cycleLanguage())}`, 'ok');
     } catch (e) {
-      notify(api.errorText(e), 'err');
+      fail(api.problemOf(e));
     }
   };
 

@@ -6,8 +6,21 @@
  * dark mode on their own.
  */
 
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from 'react';
+import { useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from 'react';
+import {
+  Check,
+  Copy,
+  KeyRound,
+  MonitorX,
+  SearchX,
+  Settings,
+  Timer,
+  TriangleAlert,
+  WifiOff,
+  X,
+} from 'lucide-react';
 
+import type { Problem, ProblemKind } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 /* --------------------------------------------------------------- layout */
@@ -214,16 +227,96 @@ export function Select({ className, children, ...rest }: SelectHTMLAttributes<HT
 
 /* ---------------------------------------------------------------- misc */
 
-/** The floating error/info strip at the top of the sheet. */
-export function Banner({ message, kind }: { message: string; kind: 'info' | 'ok' | 'err' }) {
+/** The floating info/confirmation strip at the top of the sheet. */
+export function Banner({ message, kind }: { message: string; kind: 'info' | 'ok' }) {
   const tones = {
     info: 'bg-black/5 text-ink dark:bg-white/10',
     ok: 'bg-good text-good-ink',
-    err: 'bg-red-100 text-red-900 dark:bg-red-950 dark:text-red-100',
   };
   return (
     <div className={cn('rounded-xl px-4 py-2.5 text-[13px] font-medium mb-4', tones[kind])}>
       {message}
+    </div>
+  );
+}
+
+/**
+ * What each kind of failure is marked with, so the headline is readable before
+ * it is read: a connection problem, a key, a setting nobody filled in.
+ */
+const PROBLEM_ICON: Record<ProblemKind, typeof TriangleAlert> = {
+  network: WifiOff,
+  auth: KeyRound,
+  quota: Timer,
+  request: SearchX,
+  config: Settings,
+  local: MonitorX,
+  unknown: TriangleAlert,
+};
+
+/**
+ * A failure, at the top of the sheet.
+ *
+ * Deliberately not the info strip with another colour. It does not time out —
+ * the failures that matter here happen while the user is looking at another
+ * window, so it waits to be read — and it carries three things the strip has no
+ * room for: what kind of failure it was, the error itself, and one button that
+ * puts the whole thing, version and platform included, on the clipboard for a
+ * bug report.
+ */
+export function ProblemCard({ problem, onClose }: { problem: Problem; onClose: () => void }) {
+  const [copied, setCopied] = useState(false);
+  const Icon = PROBLEM_ICON[problem.kind] ?? TriangleAlert;
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(problem.log);
+      setCopied(true);
+    } catch {
+      // The webview can refuse the clipboard. The log is on screen either way,
+      // so there is nothing to report here — and this is the one component
+      // that must not answer a failure with a failure.
+    }
+  };
+
+  return (
+    <div className="rounded-xl bg-red-100 dark:bg-red-950 text-red-900 dark:text-red-100 px-4 py-3 mb-4">
+      <div className="flex items-start gap-3">
+        <Icon className="w-4 h-4 mt-[3px] shrink-0" aria-hidden />
+        <div className="flex-1 min-w-0">
+          <p className="text-[13px] font-semibold">
+            {problem.title}
+            {problem.summary && (
+              <span className="font-normal opacity-90"> — {problem.summary}</span>
+            )}
+          </p>
+          {problem.advice && <p className="text-[12px] mt-1 opacity-90">{problem.advice}</p>}
+          {/* The raw error, wrapped and selectable, because reading it is the
+              point of showing it at all. */}
+          <p className="text-[11px] mt-2 font-mono break-words whitespace-pre-wrap opacity-75">
+            {problem.detail}
+          </p>
+          <button
+            type="button"
+            onClick={() => void copy()}
+            className={cn(
+              'inline-flex items-center gap-1.5 mt-3 px-2.5 py-1 rounded-lg text-[12px] font-semibold cursor-pointer',
+              'border border-red-300/70 hover:bg-red-200/50 dark:border-red-900 dark:hover:bg-red-900/50',
+            )}
+          >
+            {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+            {copied ? 'Copied' : 'Copy log'}
+          </button>
+        </div>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Dismiss"
+          className="shrink-0 p-1 rounded-lg cursor-pointer opacity-70 hover:opacity-100 hover:bg-red-200/50 dark:hover:bg-red-900/50"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
     </div>
   );
 }

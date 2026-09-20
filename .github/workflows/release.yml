@@ -138,6 +138,12 @@ jobs:
             the [README](https://github.com/callmearta/orra#api-keys). Translation
             can also run against any OpenAI-compatible endpoint you point it at.
 
+            When something fails — a translation that could not reach the
+            service, a key that was refused — the reason now stays on screen
+            until you close it, rather than disappearing after a few seconds.
+            **Copy log** puts the whole error, with your version and platform, on
+            the clipboard, which is what to send with a bug report.
+
       # Untagged run (workflow_dispatch): same build, no release.
       - name: Build only
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}

@@ -242,10 +242,10 @@ pub async fn finish_dictation(
     match delivered {
         Ok(Ok(())) => {}
         Ok(Err(e)) => {
-            let _ = app.emit(stt::EVT_ERROR, format!("could not insert text: {e}"));
+            crate::problem::report(app, "Could not type the text", &e);
         }
         Err(e) => {
-            let _ = app.emit(stt::EVT_ERROR, format!("insertion task failed: {e}"));
+            crate::problem::report(app, "Could not type the text", format!("insertion task failed: {e}"));
         }
     }
 
@@ -287,11 +287,11 @@ async fn translated(app: &AppHandle, text: &str, cfg: &Config) -> (String, Optio
     match done {
         Ok(Ok(out)) => (out, Some(text.to_string())),
         Ok(Err(e)) => {
-            let _ = app.emit(stt::EVT_ERROR, format!("could not translate: {e}"));
+            crate::problem::report(app, "Could not translate", &e);
             (text.to_string(), None)
         }
         Err(e) => {
-            let _ = app.emit(stt::EVT_ERROR, format!("translation task failed: {e}"));
+            crate::problem::report(app, "Could not translate", format!("translation task failed: {e}"));
             (text.to_string(), None)
         }
     }
@@ -425,12 +425,12 @@ pub fn speak(app: &AppHandle, text: String) -> Result<()> {
             match deepgram::speak_chunk(&key, &cfg.tts_model, &chunk) {
                 Ok(wav) => {
                     if let Err(e) = audio::play_wav(wav) {
-                        let _ = handle.emit(stt::EVT_ERROR, format!("playback failed: {e}"));
+                        crate::problem::report(&handle, "Could not play the speech", e);
                         break;
                     }
                 }
                 Err(e) => {
-                    let _ = handle.emit(stt::EVT_ERROR, e.to_string());
+                    crate::problem::report(&handle, "Could not read that aloud", e);
                     break;
                 }
             }

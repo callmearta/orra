@@ -113,11 +113,15 @@ fn decode(raw: &str, session: &mut Session) -> Flow {
 /// takes the same key in the same header.
 pub fn verify_key(key: &str) -> Result<String> {
     ureq::get("https://api.assemblyai.com/v2/transcript?limit=1")
+        .config()
+        .timeout_global(Some(crate::problem::VERIFY_TIMEOUT))
+        .build()
         .header("Authorization", key)
         .call()
         .map_err(|e| match e {
             ureq::Error::StatusCode(401) => anyhow!("AssemblyAI rejected that key (401)"),
             ureq::Error::StatusCode(code) => anyhow!("AssemblyAI returned HTTP {code}"),
+            ureq::Error::Timeout(_) => anyhow!("AssemblyAI did not answer in time"),
             other => anyhow!("could not reach AssemblyAI: {other}"),
         })?;
     Ok("Key is valid — AssemblyAI accepted it".to_string())
