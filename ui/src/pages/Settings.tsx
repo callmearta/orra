@@ -628,30 +628,68 @@ export default function SettingsPage() {
           </Select>
           <p className="text-[12px] text-muted mt-1.5">
             {config.translate_provider === 'gemini'
-              ? 'Whichever provider is transcribing, translating runs on Gemini, so it uses the Gemini key.'
+              ? 'Whichever provider is transcribing, translating runs on Gemini — with its own key just below.'
               : 'Any service that speaks the OpenAI /chat/completions API: OpenAI, OpenRouter, Groq, or a model running on this machine.'}
           </p>
         </div>
 
         {config.translate_provider === 'gemini' ? (
-          <Row label="Model" sub="A flash model is plenty — one short instruction and a paragraph of text.">
-            <Select
-              className="w-auto"
-              aria-label="Translation model"
-              value={config.translate_model}
-              onChange={(e) => {
-                // A different model is a different thing to check.
-                setTranslateStatus(null);
-                update({ translate_model: e.target.value });
-              }}
-            >
-              {TRANSLATE_MODELS.map(([id, label]) => (
-                <option key={id} value={id}>
-                  {label}
-                </option>
-              ))}
-            </Select>
-          </Row>
+          <>
+            <Row label="Model" sub="A flash model is plenty — one short instruction and a paragraph of text.">
+              <Select
+                className="w-auto"
+                aria-label="Translation model"
+                value={config.translate_model}
+                onChange={(e) => {
+                  // A different model is a different thing to check.
+                  setTranslateStatus(null);
+                  update({ translate_model: e.target.value });
+                }}
+              >
+                {TRANSLATE_MODELS.map(([id, label]) => (
+                  <option key={id} value={id}>
+                    {label}
+                  </option>
+                ))}
+              </Select>
+            </Row>
+
+            {/* A field of its own, because Gemini translating while something
+                else transcribes is the ordinary case: the Gemini key on the
+                transcription card is not even shown then, so a key wanted only
+                for translating would have nowhere to go. */}
+            <div>
+              <Label htmlFor="translate-gemini-key">Gemini API key</Label>
+              <div className="flex items-end gap-3">
+                <Input
+                  id="translate-gemini-key"
+                  type="password"
+                  className="flex-1"
+                  placeholder="Leave empty to use the transcription key"
+                  value={config.translate_gemini_key}
+                  onChange={(e) => {
+                    setTranslateStatus(null);
+                    update({ translate_gemini_key: e.target.value });
+                  }}
+                />
+                {config.gemini_key.trim() !== '' && (
+                  <Button
+                    variant="primary"
+                    onClick={() => {
+                      setTranslateStatus(null);
+                      update({ translate_gemini_key: config.gemini_key });
+                    }}
+                  >
+                    Use the transcription key
+                  </Button>
+                )}
+              </div>
+              <p className="text-[12px] text-muted mt-1.5">
+                Used only for translating. Left empty, it falls back to{' '}
+                <code>GEMINI_API_KEY</code> or the key on the transcription card.
+              </p>
+            </div>
+          </>
         ) : (
           <>
             <div>

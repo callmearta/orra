@@ -273,6 +273,9 @@ fn secrets(cfg: &Config) -> Vec<String> {
             .filter_map(|p| cfg.key_for(p))
             .collect();
     out.push(cfg.translate_api_key.clone());
+    // Gemini's key for translating is separate from the one `key_for` resolves,
+    // so a message that quoted it would otherwise go out in the clear.
+    out.push(cfg.translate_gemini_key.clone());
     out.push(cfg.token.clone());
 
     let encoded: Vec<String> = out.iter().map(|s| crate::stt::url_encode(s.trim())).collect();
@@ -345,6 +348,7 @@ mod tests {
     fn no_key_in_use_survives_into_a_message() {
         let cfg = Config {
             gemini_key: "AIzaSyTestKeyValue123".into(),
+            translate_gemini_key: "AIzaSyTranslateOnlyKey456".into(),
             translate_api_key: "sk-custom-test-key-9876".into(),
             token: "deadbeefdeadbeef1234".into(),
             ..Config::default()
@@ -360,6 +364,9 @@ mod tests {
         // The custom endpoint's key has no environment source, so it is always
         // the stored one and always covered.
         assert!(secrets(&cfg).iter().any(|s| s == "sk-custom-test-key-9876"));
+        // And the Gemini key used only for translating, which `key_for` never
+        // resolves and which therefore has no other way in.
+        assert!(secrets(&cfg).iter().any(|s| s == "AIzaSyTranslateOnlyKey456"));
     }
 
     /// A key pasted with a stray space is sent without it, so redacting only the

@@ -192,9 +192,13 @@ Hold the translating key (default `SUPER + ALT + T`) and speak. The dictation is
 transcribed as usual, translated, and *that* is typed. Set the target language
 and service under **Settings → Translation**.
 
-Translation runs on Gemini by default, so it needs a Gemini key whichever
-provider is transcribing. It can also run against **any OpenAI-compatible
-endpoint** — OpenAI, OpenRouter, Groq, or a model on your own machine — by
+Translation runs on Gemini by default, whichever provider is transcribing, and
+has a key field of its own under **Settings → Translation** — a Gemini key used
+only for translating is the ordinary case when something else is hearing the
+audio. Left empty, it falls back to `GEMINI_API_KEY` or the key on the
+transcription card, and **Use the transcription key** copies that one across. It
+can also run against **any OpenAI-compatible endpoint** — OpenAI, OpenRouter,
+Groq, or a model on your own machine — by
 setting the service to *Custom endpoint* and giving it an API URL, a model name
 and a key (a local server usually wants no key). The URL is the base one,
 ending at `/v1`; `/chat/completions` is appended to it. **Test translation**

@@ -305,6 +305,10 @@ pub struct Config {
     /// Key for that endpoint. One field per provider, like the transcription
     /// keys, so switching back and forth does not mean re-pasting anything.
     pub translate_api_key: String,
+    /// Key for translating with Gemini when it should differ from the one that
+    /// transcribes. Empty falls back to the transcription Gemini key, so a
+    /// single key pasted once still covers both uses.
+    pub translate_gemini_key: String,
 
     // ---- text to speech ----
     pub tts_enabled: bool,
@@ -397,6 +401,7 @@ impl Default for Config {
             translate_base_url: String::new(),
             translate_custom_model: String::new(),
             translate_api_key: String::new(),
+            translate_gemini_key: String::new(),
             tts_enabled: true,
             tts_model: "aura-2-thalia-en".into(),
             tts_autoplay: false,
@@ -528,22 +533,10 @@ impl Config {
 
     /// Environment first, then any nearby `.env`, then the stored override.
     pub fn key_for(&self, provider: Provider) -> Option<String> {
-        let var = provider.env_var();
         // The local provider has no environment variable to read — there is no
         // convention for naming one — so it is answered from settings alone.
-        // Skipped rather than looked up as the empty string, which would match a
-        // stray `=value` line in a `.env`.
-        if !var.is_empty() {
-            if let Ok(k) = std::env::var(var) {
-                if !k.trim().is_empty() {
-                    return Some(k.trim().to_string());
-                }
-            }
-            for p in dotenv_candidates() {
-                if let Some(k) = read_dotenv_key(&p, var) {
-                    return Some(k);
-                }
-            }
+        if let Some(k) = Self::env_or_dotenv(provider.env_var()) {
+            return Some(k);
         }
         let stored = match provider {
             Provider::Deepgram => &self.api_key,
@@ -554,9 +547,50 @@ impl Config {
             // two of them should not mean pasting it again.
             _ => &self.local_key,
         };
-        let k = stored.trim();
-        (!k.is_empty()).then(|| k.to_string())
+        non_empty(stored)
     }
+
+    /// The key a Gemini translation uses.
+    ///
+    /// The environment and a `.env` win here as everywhere else; then the key
+    /// set for translating; then the one set for transcribing, so a single
+    /// Gemini key pasted once still covers both. Translation is the one place a
+    /// Gemini key is wanted while Gemini is *not* transcribing, which is why it
+    /// reads a field of its own rather than `gemini_key` when it can.
+    pub fn translation_gemini_key(&self) -> Option<String> {
+        if let Some(k) = Self::env_or_dotenv(Provider::Gemini.env_var()) {
+            return Some(k);
+        }
+        self.stored_translation_gemini_key()
+    }
+
+    /// The stored keys for a Gemini translation, without the environment: the
+    /// one set for translating, else the one set for transcribing.
+    fn stored_translation_gemini_key(&self) -> Option<String> {
+        non_empty(&self.translate_gemini_key).or_else(|| non_empty(&self.gemini_key))
+    }
+
+    /// `var` in the environment, then in a nearby `.env`.
+    ///
+    /// An empty var is skipped rather than looked up, which would match a stray
+    /// `=value` line in a `.env`.
+    fn env_or_dotenv(var: &str) -> Option<String> {
+        if var.is_empty() {
+            return None;
+        }
+        if let Ok(k) = std::env::var(var) {
+            if !k.trim().is_empty() {
+                return Some(k.trim().to_string());
+            }
+        }
+        dotenv_candidates().iter().find_map(|p| read_dotenv_key(p, var))
+    }
+}
+
+/// A trimmed, non-empty value, or `None`.
+fn non_empty(value: &str) -> Option<String> {
+    let v = value.trim();
+    (!v.is_empty()).then(|| v.to_string())
 }
 
 fn dotenv_candidates() -> Vec<PathBuf> {
@@ -651,6 +685,26 @@ mod tests {
         cfg.hotkey = "SUPER + ALT + X".into();
         assert!(!cfg.migrate_macos_hotkeys());
         assert_eq!(cfg.hotkey, "SUPER + ALT + X");
+    }
+
+    /// Translating usually wants a key of its own — Gemini translating while
+    /// something else transcribes is the ordinary case — but an empty one has to
+    /// fall back to the key transcribing uses, so one paste still covers both.
+    /// The environment is deliberately not part of this: that depends on the
+    /// machine the tests run on.
+    #[test]
+    fn a_stored_translation_key_falls_back_to_the_transcription_one() {
+        let mut cfg = Config::default();
+        cfg.gemini_key = "shared".into();
+        assert_eq!(cfg.stored_translation_gemini_key().as_deref(), Some("shared"));
+
+        cfg.translate_gemini_key = "  translate  ".into();
+        assert_eq!(cfg.stored_translation_gemini_key().as_deref(), Some("translate"));
+
+        // Whitespace is not a key.
+        cfg.gemini_key = "   ".into();
+        cfg.translate_gemini_key = String::new();
+        assert_eq!(cfg.stored_translation_gemini_key(), None);
     }
 
     #[test]

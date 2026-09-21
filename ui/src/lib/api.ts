@@ -129,6 +129,8 @@ export interface Config {
   translate_base_url: string;
   translate_custom_model: string;
   translate_api_key: string;
+  /** Gemini key used only for translating; empty falls back to the one above. */
+  translate_gemini_key: string;
   tts_enabled: boolean;
   tts_model: string;
   tts_autoplay: boolean;

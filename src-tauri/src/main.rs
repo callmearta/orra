@@ -172,14 +172,21 @@ fn fit_main_to_screen(app: &tauri::App) {
     }
 }
 
+/// Collection behaviour for the HUD: join every Space (1 << 0), stay put in
+/// Mission Control (1 << 4), and be allowed alongside a fullscreen window
+/// (1 << 8). From NSWindow.h.
+#[cfg(target_os = "macos")]
+const HUD_BEHAVIOR: usize = (1 << 0) | (1 << 4) | (1 << 8);
+
+/// NSScreenSaverWindowLevel, above the window a fullscreen app is drawn at.
+#[cfg(target_os = "macos")]
+const HUD_LEVEL: isize = 1000;
+
 /// Let the HUD float over another app's fullscreen window.
 ///
 /// A window that is merely always-on-top does not: macOS gives a fullscreen app
 /// its own Space, and a window belongs to one Space unless it says otherwise.
-/// The two behaviours that change that — joining every Space and being auxiliary
-/// to a fullscreen one — have no setter in Tauri, so the NSWindow is asked
-/// directly. The level is raised to the screen-saver one, which is above the
-/// level a fullscreen app is drawn at.
+/// None of this has a setter in Tauri, so the NSWindow is asked directly.
 #[cfg(target_os = "macos")]
 fn make_hud_overlay(window: &tauri::WebviewWindow) {
     use objc2::msg_send;
@@ -187,16 +194,30 @@ fn make_hud_overlay(window: &tauri::WebviewWindow) {
 
     let Ok(ptr) = window.ns_window() else { return };
     let ns_window: *mut AnyObject = ptr.cast();
-
-    // From NSWindow.h: canJoinAllSpaces (1<<0), stationary (1<<4), and
-    // fullScreenAuxiliary (1<<8).
-    const BEHAVIOR: usize = (1 << 0) | (1 << 4) | (1 << 8);
-    // NSScreenSaverWindowLevel.
-    const SCREEN_SAVER_LEVEL: isize = 1000;
-
     unsafe {
-        let _: () = msg_send![ns_window, setCollectionBehavior: BEHAVIOR];
-        let _: () = msg_send![ns_window, setLevel: SCREEN_SAVER_LEVEL];
+        let _: () = msg_send![ns_window, setCollectionBehavior: HUD_BEHAVIOR];
+        let _: () = msg_send![ns_window, setLevel: HUD_LEVEL];
+    }
+}
+
+/// Bring the HUD forward over whatever is on screen.
+///
+/// `show()` orders the window front within its own Space but does not raise it
+/// above another app's fullscreen window; `orderFrontRegardless` does, and
+/// without activating the other app the way a key window would. The behaviour
+/// and level are re-asserted here too, since showing is the moment they have to
+/// be right and it costs nothing to repeat them.
+#[cfg(target_os = "macos")]
+fn raise_hud(window: &tauri::WebviewWindow) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    let Ok(ptr) = window.ns_window() else { return };
+    let ns_window: *mut AnyObject = ptr.cast();
+    unsafe {
+        let _: () = msg_send![ns_window, setCollectionBehavior: HUD_BEHAVIOR];
+        let _: () = msg_send![ns_window, setLevel: HUD_LEVEL];
+        let _: () = msg_send![ns_window, orderFrontRegardless];
     }
 }
 
@@ -362,6 +383,10 @@ fn watch_state_for_hud(app: &AppHandle) {
 
         if phase == "recording" {
             let _ = hud.show();
+            // macOS: showing orders the window front within its own Space but
+            // does not raise it over another app's fullscreen window.
+            #[cfg(target_os = "macos")]
+            raise_hud(&hud);
             // On Hyprland where it appears is the compositor's business — the
             // window rule written by `hotkeys::sync` positions it as it opens,
             // and moving it afterwards would map it centred and then jump. No

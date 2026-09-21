@@ -11,7 +11,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 
-use crate::config::{Config, Provider, TranslateProvider};
+use crate::config::{Config, TranslateProvider};
 
 /// How long a translation gets before the dictation gives up on it.
 ///
@@ -53,9 +53,10 @@ pub fn run(text: &str, cfg: &Config) -> Result<String> {
 fn run_into(text: &str, language: &str, cfg: &Config, timeout: Duration) -> Result<String> {
     match cfg.translate_provider {
         TranslateProvider::Gemini => {
-            let key = cfg.key_for(Provider::Gemini).ok_or_else(|| {
+            let key = cfg.translation_gemini_key().ok_or_else(|| {
                 anyhow!(
-                    "Translating uses Gemini. Add GEMINI_API_KEY to .env or paste it in Settings."
+                    "Translating uses Gemini. Add GEMINI_API_KEY to .env, or paste a key under \
+                     Settings → Translation."
                 )
             })?;
             translate(&key, &cfg.translate_model, language, text, timeout)
@@ -490,7 +491,7 @@ fn the_check_translates_into_english_whatever_the_user_translates_into() {
     #[ignore = "hits the Gemini API; run with --ignored"]
     fn a_real_translation_comes_back_as_only_the_translation() {
         let cfg = Config::default();
-        let key = cfg.key_for(Provider::Gemini).expect("GEMINI_API_KEY must be set");
+        let key = cfg.translation_gemini_key().expect("GEMINI_API_KEY must be set");
 
         // Through the same entry point the app uses, so the prompt and the
         // response parsing are both covered.
