@@ -157,19 +157,38 @@ jobs:
           echo "whisper-server-macos-universal.tar.gz sha256: $sha"
 
       # Tauri signs with the identity named in tauri.conf.json, which is a
-      # Developer ID certificate. CI only has that when APPLE_CERTIFICATE is set;
-      # without it there is no identity to sign with and the build fails outright.
-      # Ad-hoc keeps the build green — macOS just forgets the microphone and
-      # Accessibility grants on every update, which is the thing the Developer ID
-      # exists to avoid — so this warns rather than being the intended path.
-      - name: Choose the macOS signing identity
+      # Developer ID certificate. CI only has that when APPLE_CERTIFICATE is set,
+      # and the CLI must not see the variable at all when it is not: an *empty*
+      # APPLE_CERTIFICATE reads as "a certificate was provided" and the import
+      # fails, which is what took the build down. So the secrets are published to
+      # the rest of the job only when there is a certificate, and otherwise the
+      # identity falls back to ad-hoc — green, but macOS then forgets the
+      # microphone and Accessibility grants on every update.
+      - name: Configure the macOS signing
         if: matrix.platform == 'macos-14'
         shell: bash
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          NOTARY_ID: ${{ secrets.APPLE_ID }}
+          NOTARY_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          NOTARY_TEAM: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
-          if [ -n "${APPLE_CERTIFICATE:-}" ]; then
+          if [ -n "${CERTIFICATE:-}" ]; then
+            {
+              echo "APPLE_CERTIFICATE=$CERTIFICATE"
+              echo "APPLE_CERTIFICATE_PASSWORD=${CERTIFICATE_PASSWORD:-}"
+            } >> "$GITHUB_ENV"
+            # Only when notarizing is set up: an empty APPLE_ID is the same
+            # trap as an empty certificate.
+            if [ -n "${NOTARY_ID:-}" ]; then
+              {
+                echo "APPLE_ID=$NOTARY_ID"
+                echo "APPLE_PASSWORD=${NOTARY_PASSWORD:-}"
+                echo "APPLE_TEAM_ID=${NOTARY_TEAM:-}"
+              } >> "$GITHUB_ENV"
+            fi
             echo "Signing with the Developer ID certificate from APPLE_CERTIFICATE."
             exit 0
           fi
@@ -182,16 +201,6 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # The Developer ID certificate the macOS build is signed with. Without
-          # it there is no identity to sign with and the macOS job fails; see the
-          # README's porting notes for why it is not ad-hoc.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          # Optional, and only for macOS: notarization, which is what stops
-          # Gatekeeper warning about a downloaded copy. Skipped when unset.
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           args: --bundles ${{ matrix.bundles }}
           tagName: ${{ github.ref_name }}
@@ -233,11 +242,6 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           args: --bundles ${{ matrix.bundles }}
 
