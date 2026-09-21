@@ -383,10 +383,15 @@ fn watch_state_for_hud(app: &AppHandle) {
 
         if phase == "recording" {
             let _ = hud.show();
-            // macOS: showing orders the window front within its own Space but
-            // does not raise it over another app's fullscreen window.
+            // macOS: AppKit window ordering must happen on the main thread, and
+            // this listener runs on a tokio worker. `show()` marshals itself;
+            // the raw NSWindow calls below do not, and ordering from the worker
+            // is a SIGTRAP — "Must only be used from the main thread".
             #[cfg(target_os = "macos")]
-            raise_hud(&hud);
+            {
+                let overlay = hud.clone();
+                let _ = hud.run_on_main_thread(move || raise_hud(&overlay));
+            }
             // On Hyprland where it appears is the compositor's business — the
             // window rule written by `hotkeys::sync` positions it as it opens,
             // and moving it afterwards would map it centred and then jump. No

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Orra",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "identifier": "ai.orra.desktop",
   "build": {
     "beforeDevCommand": { "script": "npm run dev", "cwd": "../ui" },
