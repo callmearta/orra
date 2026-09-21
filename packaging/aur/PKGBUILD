@@ -6,12 +6,12 @@
 #
 #     makepkg --printsrcinfo > .SRCINFO
 #
-# For a new release, `./bump.sh 0.1.6` does that and the version and hash with
+# For a new release, `./bump.sh 0.1.9` does that and the version and hash with
 # it. Then copy all four files into a clone of ssh://aur@aur.archlinux.org/orra.git
 # and push.
 
 pkgname=orra
-pkgver=0.1.6
+pkgver=0.1.9
 pkgrel=1
 pkgdesc="Hold a key, speak, and the words are typed into whatever window has focus"
 arch=('x86_64')
@@ -37,7 +37,7 @@ makedepends=('cargo' 'npm' 'pkgconf')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
         "orra.desktop"
         "LICENSE")
-sha256sums=('304eb4362ee1f8ec64e7dd7359d0ec50580ffed04167e6d1829657228b2e0ee9' 'SKIP' 'SKIP')
+sha256sums=('641a78f43cf0aeef1649b1395441c8c5c062bf7eb8f6d8d915d411ce395a4399' 'SKIP' 'SKIP')
 
 build() {
   cd "$pkgname-$pkgver"
