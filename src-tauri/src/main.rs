@@ -172,6 +172,34 @@ fn fit_main_to_screen(app: &tauri::App) {
     }
 }
 
+/// Let the HUD float over another app's fullscreen window.
+///
+/// A window that is merely always-on-top does not: macOS gives a fullscreen app
+/// its own Space, and a window belongs to one Space unless it says otherwise.
+/// The two behaviours that change that — joining every Space and being auxiliary
+/// to a fullscreen one — have no setter in Tauri, so the NSWindow is asked
+/// directly. The level is raised to the screen-saver one, which is above the
+/// level a fullscreen app is drawn at.
+#[cfg(target_os = "macos")]
+fn make_hud_overlay(window: &tauri::WebviewWindow) {
+    use objc2::msg_send;
+    use objc2::runtime::AnyObject;
+
+    let Ok(ptr) = window.ns_window() else { return };
+    let ns_window: *mut AnyObject = ptr.cast();
+
+    // From NSWindow.h: canJoinAllSpaces (1<<0), stationary (1<<4), and
+    // fullScreenAuxiliary (1<<8).
+    const BEHAVIOR: usize = (1 << 0) | (1 << 4) | (1 << 8);
+    // NSScreenSaverWindowLevel.
+    const SCREEN_SAVER_LEVEL: isize = 1000;
+
+    unsafe {
+        let _: () = msg_send![ns_window, setCollectionBehavior: BEHAVIOR];
+        let _: () = msg_send![ns_window, setLevel: SCREEN_SAVER_LEVEL];
+    }
+}
+
 /// Small always-on-top overlay: a white pill with a level meter and a status dot.
 ///
 /// Larger than the pill it draws. WebKitGTK clamps any window holding a webview
@@ -203,6 +231,11 @@ fn build_hud(app: &AppHandle, visible: bool) -> tauri::Result<()> {
         .focusable(false)
         .visible(false)
         .build()?;
+
+    // macOS keeps a plain always-on-top window off another app's fullscreen
+    // Space, so the window is told to join them and sit above them.
+    #[cfg(target_os = "macos")]
+    make_hud_overlay(&hud);
 
     if visible {
         // Shown on demand when a dictation starts; nothing to do until then.

@@ -69,6 +69,15 @@ ureq = { version = "3.4.2", features = ["json"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.189"
 
+# macOS typing posts key events directly instead of going through `osascript`
+# and System Events: one permission rather than two, no process per keystroke,
+# and a failure that can be reported instead of dropped. `objc2` is for the
+# HUD's NSWindow, whose fullscreen behaviour Tauri exposes no setter for. Both
+# are already in the tree transitively, so this adds no build.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-graphics = "0.25.0"
+objc2 = "0.6.4"
+
 # Windows delivery talks to the OS directly rather than shelling out to
 # `powershell` and `clip`, which cost a console window each and mangled the
 # clipboard. Already in the tree transitively, so this adds no build.

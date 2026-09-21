@@ -44,7 +44,11 @@ fn run(cmd: &str, args: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>> {
         .args(args)
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // Captured rather than discarded: the reason these tools fail is
+        // almost always a permission, and it is said on stderr. Swallowing it
+        // turned "System Events is not allowed to send keystrokes" into the app
+        // quietly typing nothing.
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| anyhow!("{cmd}: {e}"))?;
     if let Some(data) = stdin {
@@ -55,6 +59,14 @@ fn run(cmd: &str, args: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>> {
             .write_all(data)?;
     }
     let out = child.wait_with_output()?;
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        let why = why.trim();
+        return Err(anyhow!(
+            "{cmd} failed{}",
+            if why.is_empty() { String::new() } else { format!(": {why}") }
+        ));
+    }
     Ok(out.stdout)
 }
 
@@ -317,6 +329,131 @@ mod win {
 }
 
 // ---------------------------------------------------------------------------
+// macOS
+// ---------------------------------------------------------------------------
+//
+// Keys are posted straight to the window server instead of being typed through
+// `osascript` and System Events. The old path needed Automation *and*
+// Accessibility, cost a process per keystroke, and — because the child's exit
+// status was ignored — failed silently when a permission was missing, which
+// looks exactly like the app typing nothing at all.
+//
+// Posting synthetic events needs one permission, Accessibility; without it the
+// events are dropped on the floor, so every entry point here checks first and
+// says what to do rather than pretending it worked.
+#[cfg(target_os = "macos")]
+mod mac {
+    use anyhow::{anyhow, Result};
+    use core_graphics::event::{CGEvent, CGEventFlags, CGEventTapLocation};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+
+    // Virtual keycodes from <HIToolbox/Events.h>. They are physical positions,
+    // not characters, so they do not change between keyboards or layouts.
+    const KEY_V: u16 = 9;
+    const KEY_RETURN: u16 = 36;
+    const KEY_BACKSPACE: u16 = 51;
+
+    /// How many UTF-16 units go into one typed event. The API takes a whole
+    /// string, but a long one is silently truncated on the way to some apps, so
+    /// the text is fed through in chunks that are known to survive intact.
+    const TYPE_CHUNK: usize = 20;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    unsafe extern "C" {
+        /// Whether this process may post synthetic events — that is, whether the
+        /// user has turned it on under Privacy & Security → Accessibility.
+        fn AXIsProcessTrusted() -> bool;
+    }
+
+    fn trusted() -> Result<()> {
+        if unsafe { AXIsProcessTrusted() } {
+            return Ok(());
+        }
+        // Sent to the right pane rather than only described: the permission has
+        // to be given by hand, and finding it is the tedious part. Once per run,
+        // so a second failed dictation does not reopen the window.
+        static OPENED: std::sync::Once = std::sync::Once::new();
+        OPENED.call_once(|| {
+            let _ = std::process::Command::new("open")
+                .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+                .spawn();
+        });
+        Err(anyhow!(
+            "macOS has not allowed Orra to type. Turn Orra on in System Settings → \
+             Privacy & Security → Accessibility, then dictate again."
+        ))
+    }
+
+    fn source() -> Result<CGEventSource> {
+        CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+            .map_err(|_| anyhow!("could not create the keyboard event source"))
+    }
+
+    /// Press and release `keycode`, `times` times, carrying `flags` both ways.
+    fn press(keycode: u16, flags: CGEventFlags, times: usize) -> Result<()> {
+        trusted()?;
+        let source = source()?;
+        for _ in 0..times.max(1) {
+            for keydown in [true, false] {
+                let event = CGEvent::new_keyboard_event(source.clone(), keycode, keydown)
+                    .map_err(|_| anyhow!("could not build a key event"))?;
+                event.set_flags(flags);
+                event.post(CGEventTapLocation::HID);
+            }
+        }
+        Ok(())
+    }
+
+    pub fn paste() -> Result<()> {
+        press(KEY_V, CGEventFlags::CGEventFlagCommand, 1)
+    }
+
+    pub fn enter() -> Result<()> {
+        press(KEY_RETURN, CGEventFlags::empty(), 1)
+    }
+
+    pub fn backspace(n: usize) -> Result<()> {
+        press(KEY_BACKSPACE, CGEventFlags::empty(), n)
+    }
+
+    /// Type the text itself, leaving the clipboard alone.
+    ///
+    /// A key event can carry a Unicode string directly, so this does not need to
+    /// go through the clipboard the way it used to — which is the whole point of
+    /// **Type it out** for the apps that mangle a paste.
+    pub fn type_text(text: &str) -> Result<()> {
+        trusted()?;
+        let source = source()?;
+        let mut chunk = String::new();
+        let mut units = 0;
+        for ch in text.chars() {
+            let width = ch.len_utf16();
+            if units + width > TYPE_CHUNK && units > 0 {
+                post_chunk(&source, &chunk)?;
+                chunk.clear();
+                units = 0;
+            }
+            chunk.push(ch);
+            units += width;
+        }
+        if !chunk.is_empty() {
+            post_chunk(&source, &chunk)?;
+        }
+        Ok(())
+    }
+
+    fn post_chunk(source: &CGEventSource, chunk: &str) -> Result<()> {
+        // Keycode 0 is not a real key; the string set on the event is what gets
+        // inserted, and the keydown is what makes the window server deliver it.
+        let event = CGEvent::new_keyboard_event(source.clone(), 0, true)
+            .map_err(|_| anyhow!("could not build a key event"))?;
+        event.set_string(chunk);
+        event.post(CGEventTapLocation::HID);
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // clipboard
 // ---------------------------------------------------------------------------
 
@@ -432,8 +569,7 @@ fn paste_keystroke() -> Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        let script = r#"tell application "System Events" to keystroke "v" using command down"#;
-        return run("osascript", &["-e", script], None).map(|_| ());
+        return mac::paste();
     }
     #[cfg(target_os = "windows")]
     {
@@ -462,9 +598,7 @@ fn type_text(text: &str) -> Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        // Typing arbitrary text through AppleScript is not reliable, so macOS
-        // always goes through the clipboard.
-        return paste_text(text, true);
+        return mac::type_text(text);
     }
     #[allow(unreachable_code)]
     Err(anyhow!("unsupported platform"))
@@ -501,8 +635,7 @@ pub fn press_enter() -> Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        let s = r#"tell application "System Events" to key code 36"#;
-        return run("osascript", &["-e", s], None).map(|_| ());
+        return mac::enter();
     }
     #[cfg(target_os = "windows")]
     {
@@ -535,12 +668,7 @@ pub fn press_backspace(n: usize) -> Result<()> {
     }
     #[cfg(target_os = "macos")]
     {
-        let s = format!(
-            r#"tell application "System Events" to repeat {n} times
-                   key code 51
-               end repeat"#
-        );
-        return run("osascript", &["-e", &s], None).map(|_| ());
+        return mac::backspace(n);
     }
     #[cfg(target_os = "windows")]
     {
