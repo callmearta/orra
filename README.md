@@ -549,6 +549,20 @@ under it TCC will not grant the microphone — or even show the prompt — witho
 `com.apple.security.device.audio-input`. Recording then opens the device, gets
 silence, and reports no error.
 
+Signing is not ad-hoc, and that is deliberate. TCC matches an app by its *code
+requirement*, and an ad-hoc signature's requirement is the binary's own hash —
+so every build looks like a different app and macOS asks for the microphone and
+Accessibility again, or, worse, leaves the Accessibility toggle looking on while
+denying the event posting behind it. `bundle.macOS.signingIdentity` names a
+Developer ID Application certificate instead, whose requirement is the team ID
+and never changes, so a grant survives updates. CI needs that certificate as
+secrets (`APPLE_CERTIFICATE` and `APPLE_CERTIFICATE_PASSWORD`, exported as
+Tauri's macOS signing docs describe); notarizing with the same account —
+`APPLE_ID`/`APPLE_PASSWORD`/`APPLE_TEAM_ID`, or the App Store Connect key — is
+what removes the Gatekeeper warning on download. Without the secrets the macOS
+job cannot sign and fails, which is the one thing to set up before the next
+release.
+
 The engine the one-click local models download is not upstream on macOS:
 whisper.cpp publishes only an xcframework, so the release workflow compiles a
 universal `whisper-server` itself, checksums it, bakes the hash into the app

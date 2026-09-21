@@ -50,7 +50,7 @@
       }
     },
     "macOS": {
-      "signingIdentity": "-",
+      "signingIdentity": "CDD5EF3044183BE72F7608184EB2CB4A63B630B2",
       "entitlements": "entitlements.plist"
     }
   }
