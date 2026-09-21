@@ -156,6 +156,26 @@ jobs:
           echo "ORRA_MACOS_ENGINE_SHA256=$sha" >> "$GITHUB_ENV"
           echo "whisper-server-macos-universal.tar.gz sha256: $sha"
 
+      # Tauri signs with the identity named in tauri.conf.json, which is a
+      # Developer ID certificate. CI only has that when APPLE_CERTIFICATE is set;
+      # without it there is no identity to sign with and the build fails outright.
+      # Ad-hoc keeps the build green — macOS just forgets the microphone and
+      # Accessibility grants on every update, which is the thing the Developer ID
+      # exists to avoid — so this warns rather than being the intended path.
+      - name: Choose the macOS signing identity
+        if: matrix.platform == 'macos-14'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+        run: |
+          set -euo pipefail
+          if [ -n "${APPLE_CERTIFICATE:-}" ]; then
+            echo "Signing with the Developer ID certificate from APPLE_CERTIFICATE."
+            exit 0
+          fi
+          echo "::warning::APPLE_CERTIFICATE is not set — signing macOS ad-hoc. Users will have to re-grant the microphone and Accessibility after every update."
+          python3 -c "import json,pathlib;p=pathlib.Path('src-tauri/tauri.conf.json');c=json.loads(p.read_text());c['bundle']['macOS']['signingIdentity']='-';p.write_text(json.dumps(c,indent=2)+chr(10))"
+
       # Tagged build: build and publish to the Release for this tag.
       - name: Build and publish the release
         if: startsWith(github.ref, 'refs/tags/')
