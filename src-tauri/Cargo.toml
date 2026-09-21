@@ -1,6 +1,6 @@
 [package]
 name = "orra"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 # Two binaries are declared below, so `cargo run` needs to be told which one is
 # the app; the Tauri CLI shells out to a bare `cargo run`.
@@ -48,7 +48,13 @@ serde_json = "1.0.151"
 # arrives is checked against a pinned sha256 before it is used. Already in the
 # tree transitively, so this adds no build.
 sha2 = "0.10.9"
-tauri = { version = "2.11.5", features = ["tray-icon"] }
+# The HUD is a transparent window, which Tauri gates behind `macos-private-api`.
+# It has to sit on this dependency rather than a macOS-only one: `tauri-build`
+# reads exactly this declaration and refuses to build when `macOSPrivateApi` is
+# set in tauri.conf.json without it. The feature is inert away from macOS, so
+# every release carries it. It is the private-API route, which the App Store
+# rejects; Orra ships outside the App Store.
+tauri = { version = "2.11.5", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-global-shortcut = "2.3.2"
 tauri-plugin-opener = "2.5.5"
 tauri-plugin-single-instance = "2.4.4"
@@ -62,15 +68,6 @@ ureq = { version = "3.4.2", features = ["json"] }
 # this adds no build.
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.189"
-
-# macOS draws the HUD as a transparent, click-through overlay, and Tauri gates
-# `WebviewWindowBuilder::transparent` behind this feature there — without it the
-# method does not exist and the crate does not compile. It is the private-API
-# route, which the App Store rejects; Orra ships outside the App Store, and the
-# matching `macOSPrivateApi` flag in tauri.conf.json is required beside it (Tauri
-# panics at startup if the feature is on and the flag is not).
-[target.'cfg(target_os = "macos")'.dependencies]
-tauri = { version = "2.11.5", features = ["macos-private-api"] }
 
 # Windows delivery talks to the OS directly rather than shelling out to
 # `powershell` and `clip`, which cost a console window each and mangled the

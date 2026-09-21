@@ -793,12 +793,23 @@ mod tests {
     }
 
     /// The URL is built from the pinned build, which is what makes the hash
-    /// beside it mean anything.
+    /// beside it mean anything. macOS is the exception: upstream publishes no
+    /// command-line engine for it, so that archive comes from Orra's own
+    /// release, tagged with the app's version.
     #[test]
     fn the_download_urls_are_the_pinned_ones() {
+        #[cfg(not(target_os = "macos"))]
         assert_eq!(
             asset_url("whisper-bin-ubuntu-x64.tar.gz"),
             "https://github.com/ggml-org/whisper.cpp/releases/download/b5130/whisper-bin-ubuntu-x64.tar.gz"
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            asset_url("whisper-server-macos-universal.tar.gz"),
+            format!(
+                "https://github.com/callmearta/orra/releases/download/v{}/whisper-server-macos-universal.tar.gz",
+                env!("CARGO_PKG_VERSION")
+            )
         );
         assert_eq!(
             model_url("ggml-small.bin"),

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Tauri signs macOS builds with the hardened runtime, and under it TCC will
+     not grant the microphone — it will not even show the prompt — unless the
+     binary carries this entitlement. Without the file, recording opens the
+     device and gets silence, with nothing in the UI to say why.
+
+     Only what is needed: this is the microphone entitlement and nothing that
+     weakens the runtime (no library-validation or unsigned-memory escapes). -->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+</dict>
+</plist>

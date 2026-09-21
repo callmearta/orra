@@ -60,9 +60,20 @@ impl Capture {
             }
         });
 
+        // Opening the device is instant except on macOS the first time, where
+        // the permission dialog blocks the stream until it is answered. Six
+        // seconds is long enough for a device and far too short for a person,
+        // so the first dictation would fail with a timeout while the dialog was
+        // still on screen — and look like the microphone is broken.
+        let open_timeout = if cfg!(target_os = "macos") { 60 } else { 6 };
         let sample_rate = meta_rx
-            .recv_timeout(Duration::from_secs(6))
-            .map_err(|_| anyhow!("microphone did not open in time"))??;
+            .recv_timeout(Duration::from_secs(open_timeout))
+            .map_err(|_| {
+                anyhow!(
+                    "the microphone did not open in time — if macOS is asking whether Orra may \
+                     use the microphone, answer it and dictate again"
+                )
+            })??;
         Ok(Capture { rx, sample_rate, stop, level })
     }
 }

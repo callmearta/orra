@@ -170,7 +170,7 @@ credential. Click **Verify key** to check it against the provider.
 
 ### Dictating
 
-**Hold `SUPER + ALT + D`** (configurable) and speak. A rising tone marks the
+**Hold `SUPER + ALT + D`** (on macOS `CONTROL + ALT + D`) and speak. A rising tone marks the
 start; a falling tone the end. Release, and the transcript is pasted into
 whatever window has focus.
 
@@ -434,8 +434,15 @@ build it is in `src-tauri/target/release/`, so use the full path in your bind.
 ### macOS and Windows
 
 `tauri-plugin-global-shortcut` registers the keys in-process, so a hold bind
-works the same way it does on Hyprland. macOS will ask for Accessibility
-permission the first time text is injected through System Events.
+works the same way it does on Hyprland. The defaults differ on macOS for one
+reason: the system reserves the Command+Option chords — `⌘⌥D` toggles the Dock —
+so dictate, translate and step-language default to `CONTROL + ALT + D/T/L`
+there instead, which nothing else claims. A config still holding the old default
+is moved over on first launch; a key chosen by hand is left alone.
+
+macOS asks for Accessibility permission the first time text is injected through
+System Events, for Automation permission to drive it, and for the microphone the
+first time you dictate.
 
 ---
 
@@ -532,11 +539,15 @@ The AppImage needs `patchelf` and `libfuse2`; the rpm needs `rpm`.
 Windows is built and released by CI (`.github/workflows/release.yml`, an NSIS
 `.exe`), and macOS as a `.dmg`. The macOS bundle needs no change to
 `tauri.conf.json`'s `bundle.targets`: CI passes `--bundles dmg` explicitly, and
-that overrides the `deb` default there. Two things are macOS-only and already
+that overrides the `deb` default there. Three things are macOS-only and already
 wired up — the `macos-private-api` feature beside `macOSPrivateApi`, which a
-transparent HUD window requires, and the `Info.plist` carrying the microphone
-and Apple Events usage strings, without which macOS kills the app the moment it
-records.
+transparent HUD window requires; the `Info.plist` carrying the microphone and
+Apple Events usage strings, without which macOS kills the app the moment it
+records; and `entitlements.plist`. The last one is easy to miss because nothing
+fails loudly without it: Tauri signs macOS builds with the hardened runtime, and
+under it TCC will not grant the microphone — or even show the prompt — without
+`com.apple.security.device.audio-input`. Recording then opens the device, gets
+silence, and reports no error.
 
 The engine the one-click local models download is not upstream on macOS:
 whisper.cpp publishes only an xcframework, so the release workflow compiles a

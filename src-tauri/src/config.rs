@@ -339,10 +339,30 @@ pub struct Config {
     pub token: String,
 }
 
+/// The default push-to-talk key.
+///
+/// macOS reserves the Command+Option chords for itself — ⌘⌥D toggles the Dock —
+/// and a hotkey the system eats is one that never reaches the app, so macOS
+/// gets Control+Option, which nothing else claims. Everywhere else keeps the
+/// Super+Alt binds the README and the Hyprland blocks use.
+pub fn default_hotkey() -> &'static str {
+    if cfg!(target_os = "macos") { "CTRL + ALT + D" } else { "SUPER + ALT + D" }
+}
+
+/// The default translate key. See [`default_hotkey`].
+pub fn default_translate_hotkey() -> &'static str {
+    if cfg!(target_os = "macos") { "CTRL + ALT + T" } else { "SUPER + ALT + T" }
+}
+
+/// The default language-cycle key. See [`default_hotkey`].
+pub fn default_language_hotkey() -> &'static str {
+    if cfg!(target_os = "macos") { "CTRL + ALT + L" } else { "SUPER + ALT + L" }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
-            hotkey: "SUPER + ALT + D".into(),
+            hotkey: default_hotkey().into(),
             mode: Mode::Hold,
             provider: Provider::default(),
             api_key: String::new(),
@@ -362,12 +382,12 @@ impl Default for Config {
             // covers without a settings trip.
             language: crate::deepgram::MULTILINGUAL.into(),
             language_cycle: vec!["multi".into(), "en".into(), "fa".into()],
-            language_hotkey: "SUPER + ALT + L".into(),
+            language_hotkey: default_language_hotkey().into(),
             mic: String::new(),
             smart_format: true,
             dictionary: Vec::new(),
             replacements: Vec::new(),
-            translate_hotkey: "SUPER + ALT + T".into(),
+            translate_hotkey: default_translate_hotkey().into(),
             translate_language: "en".into(),
             translate_provider: TranslateProvider::default(),
             // Verified working and far less contended than the newest flash.
@@ -450,11 +470,45 @@ impl Config {
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
-        if cfg.token.is_empty() {
+
+        let needed_token = cfg.token.is_empty();
+        if needed_token {
             cfg.token = random_token();
+        }
+        #[cfg(target_os = "macos")]
+        let moved_keys = cfg.migrate_macos_hotkeys();
+        #[cfg(not(target_os = "macos"))]
+        let moved_keys = false;
+
+        // Written once for either reason: a first run needs its token on disk,
+        // and a moved key should not be recomputed on every launch.
+        if needed_token || moved_keys {
             let _ = cfg.save();
         }
         cfg
+    }
+
+    /// Move the macOS defaults that predate this build off the Command+Option
+    /// chords, which the system reserves — ⌘⌥D toggles the Dock, so a dictate
+    /// key that was never delivered. Only the exact old default is touched: a
+    /// key the user typed is left alone, even if it uses Command+Option.
+    /// Returns whether anything changed.
+    #[cfg(target_os = "macos")]
+    fn migrate_macos_hotkeys(&mut self) -> bool {
+        let mut moved = false;
+        if self.hotkey.trim() == "SUPER + ALT + D" {
+            self.hotkey = default_hotkey().to_string();
+            moved = true;
+        }
+        if self.translate_hotkey.trim() == "SUPER + ALT + T" {
+            self.translate_hotkey = default_translate_hotkey().to_string();
+            moved = true;
+        }
+        if self.language_hotkey.trim() == "SUPER + ALT + L" {
+            self.language_hotkey = default_language_hotkey().to_string();
+            moved = true;
+        }
+        moved
     }
 
     pub fn save(&self) -> std::io::Result<()> {
@@ -578,9 +632,29 @@ mod tests {
         // deliberately not asserted here.
     }
 
+    /// The macOS defaults had to move off the Command+Option chords, which the
+    /// system reserves — ⌘⌥D toggles the Dock — so a config written before that
+    /// has to come along; a key the user chose has to stay put.
+    #[cfg(target_os = "macos")]
     #[test]
-    fn each_provider_names_its_own_environment_variable() {
-        assert_eq!(Provider::Deepgram.env_var(), "DEEPGRAM_API_KEY");
+    fn the_reserved_macos_defaults_are_moved_and_chosen_keys_are_not() {
+        let mut cfg = Config::default();
+        cfg.hotkey = "SUPER + ALT + D".into();
+        cfg.translate_hotkey = "SUPER + ALT + T".into();
+        cfg.language_hotkey = "SUPER + ALT + L".into();
+        assert!(cfg.migrate_macos_hotkeys());
+        assert_eq!(cfg.hotkey, "CTRL + ALT + D");
+        assert_eq!(cfg.translate_hotkey, "CTRL + ALT + T");
+        assert_eq!(cfg.language_hotkey, "CTRL + ALT + L");
+
+        // A chord the user picked is theirs, even a Command+Option one.
+        cfg.hotkey = "SUPER + ALT + X".into();
+        assert!(!cfg.migrate_macos_hotkeys());
+        assert_eq!(cfg.hotkey, "SUPER + ALT + X");
+    }
+
+    #[test]
+    fn each_provider_names_its_own_environment_variable() {        assert_eq!(Provider::Deepgram.env_var(), "DEEPGRAM_API_KEY");
         assert_eq!(Provider::AssemblyAi.env_var(), "ASSEMBLYAI_API_KEY");
         assert_eq!(Provider::Gemini.env_var(), "GEMINI_API_KEY");
         // Nothing the user hosts has an environment variable, which is what
