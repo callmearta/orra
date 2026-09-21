@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged into the Info.plist the bundler generates. macOS refuses to let an
+     app touch the microphone without a usage string — it kills the process the
+     moment capture starts — and it will not prompt for Automation (which is how
+     System Events types the transcript) without the Apple Events string. -->
+<plist version="1.0">
+<dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Orra records your voice while you hold the dictation key, then sends that audio to the speech-to-text service you configured.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Orra uses System Events to type the transcript into whatever window has focus.</string>
+</dict>
+</plist>

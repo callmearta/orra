@@ -44,33 +44,68 @@ const START_TIMEOUT: Duration = Duration::from_secs(180);
 ///
 /// A build tag rather than a version tag: the published binaries hang off the
 /// builds (`b5130`), and the `vX.Y.Z` tags next to them carry no assets at all.
+/// Only the platforms that fetch an upstream release have one; macOS compiles
+/// its own engine, so there is no tag to name.
+#[cfg(not(target_os = "macos"))]
 const BUILD_TAG: &str = "b5130";
 
 /// The engine archive for this platform, and the hash it must have.
 ///
 /// Pinned, not "latest": this is a binary the app downloads and then runs, so
-/// what it runs has to be the thing that was reviewed. `None` where upstream
-/// publishes no command-line build — macOS ships an xcframework — which is what
-/// hides the whole feature there rather than offering a button that cannot work.
+/// what it runs has to be the thing that was reviewed. `None` where there is
+/// nothing to pin — which is what hides the whole feature rather than offering
+/// a button that cannot work.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const ASSET: Option<(&str, &str)> = Some((
     "whisper-bin-ubuntu-x64.tar.gz",
     "53e7fd8b5764edad916b8848dd0af6abb1ff1d3b86c899e79c78652412536c32",
+));
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+const ASSET: Option<(&str, &str)> = Some((
+    "whisper-bin-ubuntu-arm64.tar.gz",
+    "93532a0e3777f26f041ffa358ee77dd88b1a33a86847c1990745327ff335a5d6",
 ));
 #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
 const ASSET: Option<(&str, &str)> = Some((
     "whisper-bin-x64.zip",
     "f9ec6c52a2e949b62ab51fa21d0d497958f9e41c3010c157c4e42932d5316f3c",
 ));
+/// macOS has no upstream command-line build — Apple gets an xcframework — so
+/// this is one Orra compiles and publishes itself (see
+/// `.github/workflows/release.yml`). The hash is injected at build time, since
+/// only the build that compiled the engine can know it; without it (a plain
+/// `cargo build`) there is nothing safe to fetch against, and the feature hides
+/// itself rather than downloading something unchecked.
+#[cfg(target_os = "macos")]
+const ASSET: Option<(&str, &str)> = match option_env!("ORRA_MACOS_ENGINE_SHA256") {
+    Some(sha) => Some(("whisper-server-macos-universal.tar.gz", sha)),
+    None => None,
+};
 #[cfg(not(any(
     all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "windows", target_arch = "x86_64")
+    all(target_os = "linux", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "x86_64"),
+    target_os = "macos"
 )))]
 const ASSET: Option<(&str, &str)> = None;
 
-/// Where the archive comes from, derived from the pinned build.
+/// Where the archive comes from.
+///
+/// The platforms upstream publishes for fetch its release by build tag. macOS
+/// has no such asset, so it fetches Orra's own copy, published alongside the
+/// app — which is why the tag and the app version are the same thing here.
 fn asset_url(asset: &str) -> String {
-    format!("https://github.com/ggml-org/whisper.cpp/releases/download/{BUILD_TAG}/{asset}")
+    #[cfg(target_os = "macos")]
+    {
+        format!(
+            "https://github.com/callmearta/orra/releases/download/v{}/{asset}",
+            env!("CARGO_PKG_VERSION")
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        format!("https://github.com/ggml-org/whisper.cpp/releases/download/{BUILD_TAG}/{asset}")
+    }
 }
 
 fn model_url(file: &str) -> String {

@@ -48,13 +48,14 @@ codebase builds for Linux, macOS and Windows.
 | Overlay positioned above the dock | ✅ | ➖ appears centred | ➖ | ➖ |
 | Clipboard / keystroke injection | ✅ `wtype` | ✅ `xdotool` or `wtype` | ⚠️ `osascript` | ⚠️ PowerShell |
 | Launch at login | ✅ XDG autostart | ✅ XDG autostart | ❌ not implemented | ❌ not implemented |
-| Released as | ✅ AppImage, deb, rpm | ✅ AppImage, deb, rpm | ❌ not built | ✅ NSIS `.exe` |
+| Released as | ✅ AppImage, deb, rpm | ✅ AppImage, deb, rpm | ✅ dmg | ✅ NSIS `.exe` |
 
 **Linux is the target that is actually exercised.** Hyprland is first-class: the
 app writes its own keybinds and window rules. Windows builds and ships an
 installer, but the project has not been run on it — the clipboard and keystroke
-paths are written but unverified. macOS is not built at all yet. Treat both as a
-starting point rather than a supported build — see
+paths are written but unverified. macOS builds and ships a `.dmg`, and its
+one-click local models are compiled and hosted by CI, but it has not been run
+there either. Treat both as a starting point rather than a supported build — see
 [Porting notes](#porting-notes-macos-and-windows).
 
 ---
@@ -64,8 +65,8 @@ starting point rather than a supported build — see
 ### From a release
 
 Every tagged release carries a bundle for each platform — Linux AppImage, deb
-and rpm, and a Windows installer. Grab the one for your system from
-[Releases](https://github.com/callmearta/orra/releases).
+and rpm, a Windows installer, and a macOS `.dmg`. Grab the one for your system
+from [Releases](https://github.com/callmearta/orra/releases).
 
 **Arch, and anything derived from it**
 
@@ -97,6 +98,9 @@ chmod +x Orra_0.1.1_amd64.AppImage
 ```
 
 **Windows** — run the `Orra_0.1.1_x64-setup.exe` installer.
+
+**macOS** — open the `.dmg` and drag Orra into Applications. The build is
+unsigned, so the first launch needs right-click → **Open**.
 
 The deb, rpm and AUR package declare `wtype` and `wl-clipboard` as dependencies,
 so your package manager pulls them in; on an AppImage, install them yourself. On
@@ -309,8 +313,9 @@ Nothing is added to the app bundle: the weights land in
 checked against a sha256 pinned in the binary as they arrive — one of them is
 executed, so what gets executed is what was reviewed. The engine runs until you
 press **Stop** or quit Orra, and a large model holds a couple of gigabytes of
-memory while it does. macOS has no upstream command-line build to fetch, so this
-entry hides itself there.
+memory while it does. whisper.cpp publishes no command-line build for macOS —
+Apple gets an xcframework — so Orra compiles and hosts that one engine itself,
+and macOS downloads it the same way, hash and all.
 
 ### Type
 
@@ -485,7 +490,7 @@ WebView2.
 ```bash
 # 1. Frontend — the Rust crate embeds the built output at compile time,
 #    so this has to run before cargo does.
-cd flow-insights-dashboard
+cd ui
 npm ci
 npm run build
 
@@ -504,7 +509,7 @@ server and shows a 404 unless that exact server happens to be the one running.
 `tauri dev` is the only build that wants the server, and the CLI strips the
 feature back out for it.
 
-`build.rs` watches `flow-insights-dashboard/dist`, because those assets are baked
+`build.rs` watches `ui/dist`, because those assets are baked
 in when the Rust crate compiles and cargo cannot see the dependency on its own —
 without it, a rebuilt frontend leaves the previous bundle embedded and the app
 serves a UI that is no longer on disk.
@@ -525,15 +530,20 @@ The AppImage needs `patchelf` and `libfuse2`; the rpm needs `rpm`.
 ### Porting notes (macOS and Windows)
 
 Windows is built and released by CI (`.github/workflows/release.yml`, an NSIS
-`.exe`). macOS is not built — to add it, change the matrix there and set
-`src-tauri/tauri.conf.json`:
+`.exe`), and macOS as a `.dmg`. The macOS bundle needs no change to
+`tauri.conf.json`'s `bundle.targets`: CI passes `--bundles dmg` explicitly, and
+that overrides the `deb` default there. Two things are macOS-only and already
+wired up — the `macos-private-api` feature beside `macOSPrivateApi`, which a
+transparent HUD window requires, and the `Info.plist` carrying the microphone
+and Apple Events usage strings, without which macOS kills the app the moment it
+records.
 
-```jsonc
-"bundle": {
-  "targets": ["deb"],   // change to "all", or to "dmg"/"app"/"nsis"/"msi"
-  ...
-}
-```
+The engine the one-click local models download is not upstream on macOS:
+whisper.cpp publishes only an xcframework, so the release workflow compiles a
+universal `whisper-server` itself, checksums it, bakes the hash into the app
+through `ORRA_MACOS_ENGINE_SHA256`, and attaches the archive to the release. A
+plain `cargo build` has no hash to pin, so it hides that feature rather than
+offering a download it cannot check.
 
 Launch-at-login is Linux-only: `set_launch_at_login` in `src-tauri/src/commands.rs`
 returns an error elsewhere and needs a LaunchAgent on macOS and a registry key on
@@ -550,7 +560,7 @@ git tag v0.1.1 && git push origin v0.1.1
 ```
 
 Bump the version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and
-`flow-insights-dashboard/package.json` first — the workflow refuses to build if
+`ui/package.json` first — the workflow refuses to build if
 the tag and the app version disagree. Running the workflow by hand from the
 Actions tab builds the same bundles without publishing anything.
 
@@ -566,7 +576,7 @@ cd src-tauri && cargo test
 cargo test -- --ignored --nocapture
 
 # Frontend
-cd flow-insights-dashboard && npm test
+cd ui && npm test
 
 # Lints
 cd src-tauri && cargo clippy --all-targets
@@ -608,7 +618,7 @@ src-tauri/src/
   stats.rs       the Insights aggregates
   bin/ctl.rs     orra-ctl — the tiny client the compositor binds call
 
-flow-insights-dashboard/   React + TypeScript + Vite + Tailwind settings UI
+ui/   React + TypeScript + Vite + Tailwind settings UI
   src/pages/               one file per screen
   src/lib/stats.ts         presentation helpers (the arithmetic lives in Rust)
 ```
@@ -681,10 +691,12 @@ the server should answer. A server that replies with HTML is telling you it is
 not an OpenAI-compatible API in the first place. The field is free text either
 way.
 
-**"Orra — open-source models" is missing from the list.** There is no upstream
-command-line build for this platform to fetch (macOS ships an xcframework and
-nothing else), so the entry hides itself rather than offering a download that
-would 404. Point **Custom endpoint** at a server you run instead.
+**"Orra — open-source models" offers no models to download.** The block is drawn
+from `engine::ASSET`, which is `None` when there is no engine to fetch — a
+platform upstream publishes nothing for, or a `cargo build` made without
+`ORRA_MACOS_ENGINE_SHA256`, which is the hash of the engine Orra builds for
+macOS and only the release workflow knows. Releases carry it on every platform.
+Point **Custom endpoint** at a server you run instead.
 
 **A local dictation types nothing, or the server refuses the request.** The
 error quotes what the server said, and it usually names the setting at fault:
@@ -727,7 +739,7 @@ Issues and pull requests are welcome. Before opening a PR:
 
 ```bash
 cd src-tauri && cargo test && cargo clippy --all-targets
-cd ../flow-insights-dashboard && npm run build && npm test
+cd ../ui && npm run build && npm test
 ```
 
 Both should be clean. The code is commented to explain *why* rather than *what* —

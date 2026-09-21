@@ -11,8 +11,8 @@
 /src-tauri/gen/schemas/
 
 # --- frontend ------------------------------------------------------------
-/flow-insights-dashboard/node_modules/
-/flow-insights-dashboard/dist/
+/ui/node_modules/
+/ui/dist/
 
 # --- packaging -----------------------------------------------------------
 # What `makepkg` leaves behind: the source tarball it downloaded, the tree it
