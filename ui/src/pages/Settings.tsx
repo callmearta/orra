@@ -7,8 +7,10 @@ import {
   Button,
   Card,
   Divider,
+  FieldError,
   Input,
   Label,
+  LocalProgressStrip,
   PageHeading,
   Pill,
   Row,
@@ -18,6 +20,7 @@ import {
 } from '@/components/ui';
 import * as api from '@/lib/api';
 import { TRANSLATE_LANGUAGES, TRANSLATE_MODELS } from '@/lib/translate-catalog';
+import { blank, httpUrl, required } from '@/lib/validation';
 import { useStore } from '@/store';
 
 /**
@@ -40,21 +43,6 @@ const PROVIDER_BLURB: Record<api.Provider, string> = {
   orra: 'A model Orra downloads and runs on this machine itself. Nothing to install first, and the settings below are filled in for you.',
 };
 
-/** `12345678` bytes reads better as `12 MB` at every point it is shown here. */
-const mb = (bytes: number) => `${Math.round(bytes / 1_000_000)} MB`;
-
-/** What a download event means in a sentence. */
-function progressText(p: api.LocalProgress): string {
-  if (p.what === 'starting') {
-    return 'Starting the engine — loading the model, which takes a moment…';
-  }
-  if (p.total > 0) {
-    const percent = Math.min(100, Math.round((p.received / p.total) * 100));
-    return `Downloading ${p.label} — ${percent}% of ${mb(p.total)}`;
-  }
-  return `Downloading ${p.label} — ${mb(p.received)} so far`;
-}
-
 /**
  * Fetching and running a model on this machine.
  *
@@ -64,15 +52,9 @@ function progressText(p: api.LocalProgress): string {
  * published for the platform, rather than offering a button that cannot work.
  */
 function LocalEngine({ onSettled }: { onSettled: () => void }) {
-  const { fail, notify } = useStore();
+  const { fail, localBusy, localProgress, downloadLocalModel, useLocalModel, stopLocalEngine } = useStore();
   const [info, setInfo] = useState<api.LocalAvailability | null>(null);
   const [choice, setChoice] = useState<string>('');
-  // What a button press on this card is doing, and whether it is still doing it.
-  const [action, setAction] = useState<string | null>(null);
-  // What the backend says is happening, which is not always something pressed
-  // here: the engine starts on its own at launch, and when the provider is
-  // switched to this one.
-  const [progress, setProgress] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -105,58 +87,20 @@ function LocalEngine({ onSettled }: { onSettled: () => void }) {
     return () => stop?.();
   }, [refresh]);
 
-  useEffect(() => {
-    // Progress for as long as this block is on screen. Nothing else in the app
-    // shows a download, so nothing else listens for it.
-    let stop: (() => void) | undefined;
-    void api
-      .listen<api.LocalProgress>('local-download', (p) => {
-        // `done` marks the end of the work rather than progress through it.
-        // Without it a start that finished — or that failed, with its reason on
-        // a card above — leaves its line here for good.
-        setProgress(p.what === 'done' ? null : progressText(p));
-      })
-      .then((off) => {
-        stop = off;
-      });
-    return () => stop?.();
-  }, []);
-
   if (!info?.supported) return null;
 
   const chosen = info.models.find((m) => m.name === choice);
+  const chosenRunning = info.running && info.running_model === choice;
   const running = info.running_model
     ? info.models.find((m) => m.name === info.running_model)?.label ?? info.running_model
     : null;
 
   const act = async (what: 'download' | 'use' | 'stop') => {
-    setAction(
-      what === 'stop'
-        ? 'Stopping…'
-        : what === 'download'
-          ? `Fetching ${chosen?.label ?? ''}…`
-          : `Starting ${chosen?.label ?? ''} — loading the model takes a moment…`,
-    );
-    try {
-      if (what === 'stop') {
-        await api.stopLocalEngine();
-        notify('The local model has stopped', 'ok');
-      } else if (what === 'download') {
-        // Downloading leaves it on disk and stops there: starting it is the
-        // press after this one, and Stop never throws the weights away.
-        notify(await api.downloadLocalModel(choice), 'ok');
-      } else {
-        notify(await api.useLocalModel(choice), 'ok');
-      }
-      onSettled();
-    } catch (e) {
-      // The card carries the failure, and it quotes the engine's own log when
-      // it was the engine that would not start.
-      fail(api.problemOf(e));
-    } finally {
-      setAction(null);
-      void refresh();
-    }
+    if (what === 'stop') await stopLocalEngine();
+    else if (what === 'download') await downloadLocalModel(choice);
+    else await useLocalModel(choice);
+    onSettled();
+    void refresh();
   };
 
   return (
@@ -181,19 +125,47 @@ function LocalEngine({ onSettled }: { onSettled: () => void }) {
             {/* Download first, start second: the weights are worth keeping
                 whether or not the model is running, and Stop must not take
                 them with it. */}
-            {chosen?.installed ? (
-              <Button variant="primary" onClick={() => void act('use')} disabled={action !== null}>
+            {chosenRunning ? (
+              <Button
+                variant="primary"
+                status="active"
+                statusText="Running"
+                disabled
+                className="disabled:opacity-100"
+              >
+                <Play className="w-4 h-4" />
+                Running
+              </Button>
+            ) : chosen?.installed ? (
+              <Button
+                variant="primary"
+                onClick={() => void act('use')}
+                loading={localBusy === 'use'}
+                loadingText="Starting…"
+                disabled={localBusy !== null}
+              >
                 <Play className="w-4 h-4" />
                 Use this model
               </Button>
             ) : (
-              <Button variant="primary" onClick={() => void act('download')} disabled={action !== null}>
+              <Button
+                variant="primary"
+                onClick={() => void act('download')}
+                loading={localBusy === 'download'}
+                loadingText="Downloading…"
+                disabled={localBusy !== null}
+              >
                 <Download className="w-4 h-4" />
                 Download
               </Button>
             )}
             {info.running && (
-              <Button onClick={() => void act('stop')} disabled={action !== null}>
+              <Button
+                onClick={() => void act('stop')}
+                loading={localBusy === 'stop'}
+                loadingText="Stopping…"
+                disabled={localBusy !== null}
+              >
                 <Square className="w-4 h-4" />
                 Stop
               </Button>
@@ -204,11 +176,19 @@ function LocalEngine({ onSettled }: { onSettled: () => void }) {
             nothing to install first, and nothing added to the app bundle.
           </p>
         </div>
-        <p className="text-[12px] text-muted">
-          {action ??
-            progress ??
-            (running ? `Running ${running}.` : 'Nothing is running from here.')}
-        </p>
+        {localProgress ? (
+          <LocalProgressStrip progress={localProgress} />
+        ) : (
+          <p className="text-[12px] text-muted">
+            {localBusy === 'download'
+              ? 'Preparing the download…'
+              : localBusy === 'use'
+                ? 'Starting the engine — loading the model takes a moment…'
+                : running
+                  ? `Running ${running}.`
+                  : 'Nothing is running from here.'}
+          </p>
+        )}
       </div>
     </>
   );
@@ -218,7 +198,15 @@ export default function SettingsPage() {
   const { config, status, notify, fail, update, updateNow, refreshStatus } = useStore();
   const [keyStatus, setKeyStatus] = useState<string | null>(null);
   const [translateStatus, setTranslateStatus] = useState<string | null>(null);
+  const [keyChecking, setKeyChecking] = useState(false);
+  const [translateChecking, setTranslateChecking] = useState(false);
+  const [separateTranslateKey, setSeparateTranslateKey] = useState(
+    () => !blank(config?.translate_gemini_key ?? ''),
+  );
+  const [applyingHotkey, setApplyingHotkey] = useState(false);
+  const [hotkeyApplied, setHotkeyApplied] = useState(false);
   const [quitting, setQuitting] = useState(false);
+  const [quitBusy, setQuitBusy] = useState(false);
 
   if (!config) return null;
 
@@ -229,6 +217,27 @@ export default function SettingsPage() {
   const providers = status?.providers ?? [];
   const provider = providers.find((p) => p.value === config.provider);
   const keyField: api.KeyField = provider?.key_field ?? 'api_key';
+  const hotkeyError = required(config.hotkey, 'Push-to-talk key');
+  const localUrlError =
+    provider?.self_hosted && config.provider !== 'orra' ? httpUrl(config.local_base_url, 'Endpoint') : null;
+  const providerKeyError =
+    provider && !provider.self_hosted && !status?.has_key && blank(config[keyField])
+      ? `${api.providerLabel(config.provider)} API key is required.`
+      : null;
+  const presetEndpoints = providers.filter(
+    (p) => p.preset_url && p.value !== config.provider && p.value !== 'orra',
+  );
+  const translateUrlError =
+    config.translate_provider === 'custom' ? httpUrl(config.translate_base_url, 'API URL') : null;
+  const translateModelError =
+    config.translate_provider === 'custom'
+      ? required(config.translate_custom_model, 'Model')
+      : null;
+  const useTranscriptionKey = !separateTranslateKey;
+  const translateGeminiKeyError =
+    config.translate_provider === 'gemini' && separateTranslateKey && blank(config.translate_gemini_key)
+      ? 'Enter a Gemini API key, or turn on Use transcription key.'
+      : null;
 
   return (
     <>
@@ -245,11 +254,18 @@ export default function SettingsPage() {
           <HotkeyInput
             label="Push to talk key"
             value={config.hotkey}
-            onChange={(hotkey) => void updateNow({ hotkey })}
+            invalid={!!hotkeyError}
+            onChange={(hotkey) => {
+              setHotkeyApplied(false);
+              void updateNow({ hotkey });
+            }}
           />
-          <p className="text-[12px] text-muted mt-1.5">
-            Click the box, then press the combination you want.
-          </p>
+          <FieldError>{hotkeyError}</FieldError>
+          {!hotkeyError && (
+            <p className="text-[12px] text-muted mt-1.5">
+              Click the box, then press the combination you want.
+            </p>
+          )}
         </div>
 
         <Row
@@ -279,7 +295,10 @@ export default function SettingsPage() {
             <HotkeyInput
               label="Switch language key"
               value={config.language_hotkey}
-              onChange={(language_hotkey) => void updateNow({ language_hotkey })}
+              onChange={(language_hotkey) => {
+                setHotkeyApplied(false);
+                void updateNow({ language_hotkey });
+              }}
             />
             <p className="text-[12px] text-muted mt-1.5">
               Steps through the languages listed under Voice. A whisper server detects the language
@@ -299,11 +318,21 @@ export default function SettingsPage() {
           }
         >
           <Button
+            loading={applyingHotkey}
+            loadingText="Applying…"
+            status={hotkeyApplied ? 'success' : 'idle'}
+            statusText="Applied"
+            disabled={!!hotkeyError}
             onClick={async () => {
+              setApplyingHotkey(true);
+              setHotkeyApplied(false);
               try {
                 notify(await api.applyHotkey(), 'ok');
+                setHotkeyApplied(true);
               } catch (e) {
                 fail(api.problemOf(e));
+              } finally {
+                setApplyingHotkey(false);
               }
             }}
           >
@@ -431,27 +460,39 @@ export default function SettingsPage() {
                   <Label htmlFor="local-url">Endpoint</Label>
                   <Input
                     id="local-url"
-                    list="local-endpoints"
                     placeholder="http://localhost:8000/v1"
                     value={config.local_base_url}
+                    invalid={!!localUrlError}
+                    aria-describedby="local-url-help"
                     onChange={(e) => {
                       setKeyStatus(null);
                       update({ local_base_url: e.target.value });
                     }}
                   />
-                  <datalist id="local-endpoints">
-                    {providers
-                      .filter((p) => p.preset_url && p.value !== config.provider)
-                      .map((p) => (
-                        <option key={p.value} value={p.preset_url!}>
+                  {presetEndpoints.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {presetEndpoints.map((p) => (
+                        <button
+                          key={p.value}
+                          type="button"
+                          onClick={() => {
+                            setKeyStatus(null);
+                            update({ local_base_url: p.preset_url!, local_transport: 'http' });
+                          }}
+                          className="rounded-full border border-hair px-2.5 py-1 text-[11px] font-semibold text-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
+                        >
                           {p.label}
-                        </option>
+                        </button>
                       ))}
-                  </datalist>
-                  <p className="text-[12px] text-muted mt-1.5">
-                    Where the server answers. <code>/audio/transcriptions</code> is added for you,
-                    unless the URL already ends at <code>/inference</code>.
-                  </p>
+                    </div>
+                  )}
+                  <FieldError>{localUrlError}</FieldError>
+                  {!localUrlError && (
+                    <p id="local-url-help" className="text-[12px] text-muted mt-1.5">
+                      Where the server answers. <code>/audio/transcriptions</code> is added for you,
+                      unless the URL already ends at <code>/inference</code>.
+                    </p>
+                  )}
                 </div>
 
                 {provider.has_transport_choice && (
@@ -513,10 +554,13 @@ export default function SettingsPage() {
                   : 'Read from .env — paste here to override'
               }
               value={config[keyField]}
+              invalid={!!providerKeyError}
               onChange={(e) => update({ [keyField]: e.target.value })}
             />
-            <p className="text-[12px] text-muted mt-1.5">
-              {provider?.self_hosted ? (
+            <FieldError>{providerKeyError}</FieldError>
+            {!providerKeyError && (
+              <p className="text-[12px] text-muted mt-1.5">
+                {provider?.self_hosted ? (
                 <>
                   Sent as a <code>Bearer</code> token. Left empty, no authorization header goes out
                   at all, which is what a server on this machine normally wants.
@@ -526,15 +570,21 @@ export default function SettingsPage() {
                   Resolution order is environment, then the nearest <code>.env</code>, then this
                   value. Read aloud always uses Deepgram's voices, so it needs a Deepgram key too.
                 </>
-              )}
-            </p>
+                )}
+              </p>
+            )}
           </div>
         )}
 
         <div className="flex items-center gap-3">
           <Button
+            loading={keyChecking}
+            loadingText="Checking…"
+            status={keyStatus ? 'success' : 'idle'}
+            statusText={provider?.self_hosted ? 'Server OK' : 'Verified'}
+            disabled={!!localUrlError || !!providerKeyError}
             onClick={async () => {
-              setKeyStatus('Checking…');
+              setKeyChecking(true);
               try {
                 // The fields above save on a debounce, so a check clicked
                 // straight after typing would otherwise test the values from
@@ -556,6 +606,8 @@ export default function SettingsPage() {
                 // reading as though the check were still running.
                 setKeyStatus(null);
                 fail(api.problemOf(e));
+              } finally {
+                setKeyChecking(false);
               }
             }}
           >
@@ -654,41 +706,47 @@ export default function SettingsPage() {
               </Select>
             </Row>
 
+            <Row
+              label="Use transcription key"
+              sub="Translate with the Gemini key already configured for transcription, or fall back to GEMINI_API_KEY."
+            >
+              <Toggle
+                label="Use transcription key"
+                checked={useTranscriptionKey}
+                onChange={(next) => {
+                  setTranslateStatus(null);
+                  setSeparateTranslateKey(!next);
+                  if (next) update({ translate_gemini_key: '' });
+                }}
+              />
+            </Row>
+
             {/* A field of its own, because Gemini translating while something
                 else transcribes is the ordinary case: the Gemini key on the
                 transcription card is not even shown then, so a key wanted only
                 for translating would have nowhere to go. */}
-            <div>
-              <Label htmlFor="translate-gemini-key">Gemini API key</Label>
-              <div className="flex items-end gap-3">
+            {!useTranscriptionKey && (
+              <div>
+                <Label htmlFor="translate-gemini-key">Gemini API key</Label>
                 <Input
                   id="translate-gemini-key"
                   type="password"
-                  className="flex-1"
-                  placeholder="Leave empty to use the transcription key"
+                  placeholder="Paste a Gemini key for translation"
                   value={config.translate_gemini_key}
+                  invalid={!!translateGeminiKeyError}
                   onChange={(e) => {
                     setTranslateStatus(null);
                     update({ translate_gemini_key: e.target.value });
                   }}
                 />
-                {config.gemini_key.trim() !== '' && (
-                  <Button
-                    variant="primary"
-                    onClick={() => {
-                      setTranslateStatus(null);
-                      update({ translate_gemini_key: config.gemini_key });
-                    }}
-                  >
-                    Use the transcription key
-                  </Button>
+                <FieldError>{translateGeminiKeyError}</FieldError>
+                {!translateGeminiKeyError && (
+                  <p className="text-[12px] text-muted mt-1.5">
+                    Used only for translating. Stored separately from the transcription key.
+                  </p>
                 )}
               </div>
-              <p className="text-[12px] text-muted mt-1.5">
-                Used only for translating. Left empty, it falls back to{' '}
-                <code>GEMINI_API_KEY</code> or the key on the transcription card.
-              </p>
-            </div>
+            )}
           </>
         ) : (
           <>
@@ -698,6 +756,7 @@ export default function SettingsPage() {
                 id="translate-url"
                 placeholder="https://api.openai.com/v1"
                 value={config.translate_base_url}
+                invalid={!!translateUrlError}
                 onChange={(e) => {
                   // Editing any of the three fields invalidates the last check,
                   // or a pass for the old endpoint sits there reading as a pass
@@ -706,10 +765,13 @@ export default function SettingsPage() {
                   update({ translate_base_url: e.target.value });
                 }}
               />
-              <p className="text-[12px] text-muted mt-1.5">
-                The base URL, ending at <code>/v1</code> or whatever your service uses.{' '}
-                <code>/chat/completions</code> is added for you.
-              </p>
+              <FieldError>{translateUrlError}</FieldError>
+              {!translateUrlError && (
+                <p className="text-[12px] text-muted mt-1.5">
+                  The base URL, ending at <code>/v1</code> or whatever your service uses.{' '}
+                  <code>/chat/completions</code> is added for you.
+                </p>
+              )}
             </div>
 
             <ModelField
@@ -718,6 +780,7 @@ export default function SettingsPage() {
               placeholder="gpt-4o-mini"
               url={config.translate_base_url}
               apiKey={config.translate_api_key}
+              error={translateModelError}
               help={
                 <>
                   Named exactly as your service expects it, e.g. <code>gpt-4o-mini</code> or{' '}
@@ -753,8 +816,13 @@ export default function SettingsPage() {
             transcription card only ever tests the provider that transcribes. */}
         <div className="flex items-center gap-3">
           <Button
+            loading={translateChecking}
+            loadingText="Testing…"
+            status={translateStatus ? 'success' : 'idle'}
+            statusText="Working"
+            disabled={!!translateUrlError || !!translateModelError || !!translateGeminiKeyError}
             onClick={async () => {
-              setTranslateStatus('Translating a test phrase…');
+              setTranslateChecking(true);
               try {
                 // The fields above save on a debounce, so a check clicked
                 // straight after typing would otherwise test the values from
@@ -768,6 +836,8 @@ export default function SettingsPage() {
                 // the static "Checking the translation service".
                 setTranslateStatus(null);
                 fail(api.problemOf(e));
+              } finally {
+                setTranslateChecking(false);
               }
             }}
           >
@@ -795,7 +865,20 @@ export default function SettingsPage() {
         >
           {quitting ? (
             <div className="flex gap-2">
-              <Button variant="danger" onClick={() => void api.quit()}>
+              <Button
+                variant="danger"
+                loading={quitBusy}
+                loadingText="Quitting…"
+                onClick={async () => {
+                  setQuitBusy(true);
+                  try {
+                    await api.quit();
+                  } catch (e) {
+                    fail(api.problemOf(e));
+                    setQuitBusy(false);
+                  }
+                }}
+              >
                 Quit now
               </Button>
               <Button onClick={() => setQuitting(false)}>Cancel</Button>

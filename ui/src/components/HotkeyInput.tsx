@@ -44,10 +44,12 @@ export function HotkeyInput({
   value,
   onChange,
   label,
+  invalid = false,
 }: {
   value: string;
   onChange: (hotkey: string) => void;
   label: string;
+  invalid?: boolean;
 }) {
   const [listening, setListening] = useState(false);
 
@@ -57,6 +59,7 @@ export function HotkeyInput({
       aria-label={label}
       value={listening ? 'Press your keys…' : value}
       placeholder="Click, then press your keys"
+      invalid={invalid}
       className={listening ? 'border-teal cursor-crosshair' : 'cursor-pointer'}
       onClick={() => setListening(true)}
       onBlur={() => setListening(false)}

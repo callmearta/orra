@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import { Sidebar, type NavId } from '@/components/Sidebar';
-import { Banner, ProblemCard } from '@/components/ui';
+import { Banner, LocalProgressStrip, ProblemCard } from '@/components/ui';
 import { WindowChrome } from '@/components/WindowChrome';
 
 import DictionaryPage from './pages/Dictionary';
@@ -18,7 +18,7 @@ function Placeholder({ message }: { message: string }) {
 }
 
 function Shell() {
-  const { ready, bootError, config, status, banner, problem, dismissProblem, update } = useStore();
+  const { ready, bootError, config, status, banner, problem, localProgress, dismissProblem, update } = useStore();
   const [nav, setNav] = useState<NavId>('dictate');
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
@@ -79,6 +79,7 @@ function Shell() {
           ) : (
             banner && <Banner message={banner.message} kind={banner.kind} />
           )}
+          {localProgress && nav !== 'settings' && <LocalProgressStrip progress={localProgress} />}
           {bootError ? (
             <Placeholder message={`Could not start the interface: ${bootError}`} />
           ) : !ready || !config ? (

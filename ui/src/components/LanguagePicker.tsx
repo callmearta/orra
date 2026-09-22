@@ -17,19 +17,25 @@ export function LanguagePicker({
   current,
   options,
   note,
+  loading = false,
   onPick,
 }: {
   current: string;
   options: Language[];
   /** One line about what the choice means for this provider. */
   note: string;
+  loading?: boolean;
   onPick: (code: string) => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
 
   return (
     <>
-      <Button onClick={() => dialog.current?.showModal()}>
+      <Button
+        onClick={() => dialog.current?.showModal()}
+        loading={loading}
+        loadingText="Switching…"
+      >
         <Languages className="w-4 h-4" />
         {languageName(current, options)}
       </Button>

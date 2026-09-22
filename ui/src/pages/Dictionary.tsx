@@ -1,8 +1,9 @@
 import { Plus, Trash2 } from 'lucide-react';
 
-import { Button, Card, Divider, Empty, Input, PageHeading, Row, SectionTitle, Toggle } from '@/components/ui';
+import { Button, Card, Divider, Empty, FieldError, Input, PageHeading, Row, SectionTitle, Toggle } from '@/components/ui';
 import * as api from '@/lib/api';
 import { num } from '@/lib/stats';
+import { blank, duplicate } from '@/lib/validation';
 import { useStore } from '@/store';
 
 /**
@@ -16,6 +17,8 @@ export default function DictionaryPage() {
   const words = config.dictionary;
 
   const setWords = (next: string[]) => update({ dictionary: next });
+  const errorFor = (word: string) =>
+    blank(word) ? 'Enter a word or remove this row.' : duplicate(word, words, 'This word');
 
   return (
     <>
@@ -45,17 +48,21 @@ export default function DictionaryPage() {
             {words.map((word, index) => (
               <div key={index}>
                 {index > 0 && <Divider />}
-                <div className="flex items-center gap-3">
-                  <Input
-                    aria-label={`Dictionary word ${index + 1}`}
-                    placeholder="Orra, Kubernetes, your surname…"
-                    value={word}
-                    onChange={(e) => {
-                      const next = [...words];
-                      next[index] = e.target.value;
-                      setWords(next);
-                    }}
-                  />
+                <div className="flex items-start gap-3">
+                  <div className="flex-1">
+                    <Input
+                      aria-label={`Dictionary word ${index + 1}`}
+                      placeholder="Orra, Kubernetes, your surname…"
+                      value={word}
+                      invalid={!!errorFor(word)}
+                      onChange={(e) => {
+                        const next = [...words];
+                        next[index] = e.target.value;
+                        setWords(next);
+                      }}
+                    />
+                    <FieldError>{errorFor(word)}</FieldError>
+                  </div>
                   <Button
                     variant="mini"
                     className="shrink-0"

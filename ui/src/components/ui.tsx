@@ -6,11 +6,27 @@
  * dark mode on their own.
  */
 
-import { useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from 'react';
+import {
+  Children,
+  Fragment,
+  isValidElement,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ButtonHTMLAttributes,
+  type InputHTMLAttributes,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from 'react';
+import { createPortal } from 'react-dom';
 import {
   Check,
+  ChevronDown,
   Copy,
   KeyRound,
+  Loader2,
   MonitorX,
   SearchX,
   Settings,
@@ -20,7 +36,7 @@ import {
   X,
 } from 'lucide-react';
 
-import type { Problem, ProblemKind } from '@/lib/api';
+import type { LocalProgress, Problem, ProblemKind } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 /* --------------------------------------------------------------- layout */
@@ -95,11 +111,73 @@ export function Divider() {
   return <div className="border-t border-hair my-4" />;
 }
 
+/** A compact removable tag/badge for multi-value option lists. */
+export function Tag({
+  children,
+  onRemove,
+  removeLabel = 'Remove',
+}: {
+  children: ReactNode;
+  onRemove?: () => void;
+  removeLabel?: string;
+}) {
+  return (
+    <span className="inline-flex max-w-full items-center gap-1 rounded-full border border-hair bg-sheet pl-2 pr-1 py-1 text-[12px] font-semibold">
+      <span className="min-w-0">{children}</span>
+      {onRemove && (
+        <button
+          type="button"
+          aria-label={removeLabel}
+          title={removeLabel}
+          onClick={onRemove}
+          className="shrink-0 rounded-full p-1 text-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
+        >
+          <X className="w-3.5 h-3.5" aria-hidden />
+        </button>
+      )}
+    </span>
+  );
+}
+
 export function Label({ children, htmlFor }: { children: ReactNode; htmlFor?: string }) {
   return (
     <label htmlFor={htmlFor} className="block text-[12px] font-semibold text-muted mb-1.5">
       {children}
     </label>
+  );
+}
+
+export function FieldError({ children }: { children?: ReactNode }) {
+  if (!children) return null;
+  return (
+    <p className="text-[11px] font-medium text-red-600 dark:text-red-400 mt-1.5" role="alert">
+      {children}
+    </p>
+  );
+}
+
+export function Field({
+  label,
+  htmlFor,
+  error,
+  hint,
+  children,
+  className,
+}: {
+  label: ReactNode;
+  htmlFor?: string;
+  error?: ReactNode;
+  hint?: ReactNode;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={className}>
+      <Label htmlFor={htmlFor}>{label}</Label>
+      {children}
+      <FieldError>{error}</FieldError>
+      {hint && !error && <p className="text-[12px] text-muted mt-1.5">{hint}</p>}
+    </div>
   );
 }
 
@@ -137,11 +215,31 @@ export function Pill({
 
 /* ------------------------------------------------------------- controls */
 
+type ButtonStatus = 'idle' | 'loading' | 'success' | 'active';
+
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: 'primary' | 'ghost' | 'danger' | 'mini';
+  loading?: boolean;
+  loadingText?: string;
+  status?: ButtonStatus;
+  statusText?: string;
 };
 
-export function Button({ variant = 'ghost', className, ...rest }: ButtonProps) {
+export function Button({
+  variant = 'ghost',
+  className,
+  loading = false,
+  loadingText,
+  status = 'idle',
+  statusText,
+  disabled,
+  children,
+  ...rest
+}: ButtonProps) {
+  const effectiveStatus: ButtonStatus = loading ? 'loading' : status;
+  const busy = effectiveStatus === 'loading';
+  const done = effectiveStatus === 'success';
+  const active = effectiveStatus === 'active';
   const variants = {
     primary: 'bg-teal text-white hover:brightness-110 px-4 py-2.5 text-[13px]',
     ghost: 'border border-hair hover:bg-black/5 dark:hover:bg-white/10 px-4 py-2.5 text-[13px]',
@@ -149,17 +247,67 @@ export function Button({ variant = 'ghost', className, ...rest }: ButtonProps) {
       'border border-red-300 text-red-700 hover:bg-red-50 dark:border-red-900 dark:text-red-300 dark:hover:bg-red-950 px-4 py-2.5 text-[13px]',
     mini: 'border border-hair hover:bg-black/5 dark:hover:bg-white/10 px-2.5 py-1 text-[12px]',
   };
+  const label =
+    busy && loadingText
+      ? loadingText
+      : done || active
+        ? statusText ?? children
+        : children;
+
   return (
     <button
       type="button"
+      disabled={disabled || busy}
+      aria-busy={busy || undefined}
       className={cn(
         'inline-flex items-center justify-center gap-1.5 rounded-xl font-semibold transition-colors',
         'disabled:opacity-40 disabled:pointer-events-none cursor-pointer',
         variants[variant],
+        done && 'bg-good text-good-ink border-transparent hover:bg-good',
+        active && 'bg-teal text-white border-transparent hover:bg-teal',
         className,
       )}
       {...rest}
-    />
+    >
+      {busy && <Loader2 className="w-4 h-4 shrink-0 animate-spin" aria-hidden />}
+      {done && <Check className="w-4 h-4 shrink-0" aria-hidden />}
+      {active && <span className="w-2 h-2 shrink-0 rounded-full bg-current animate-pulse" aria-hidden />}
+      {label}
+    </button>
+  );
+}
+
+export function Spinner({ className }: { className?: string }) {
+  return <Loader2 className={cn('w-4 h-4 animate-spin', className)} aria-hidden />;
+}
+
+export function Progress({
+  value,
+  indeterminate = false,
+  className,
+}: {
+  /** 0–100. Omit or pass `indeterminate` when the endpoint reports no total. */
+  value?: number;
+  indeterminate?: boolean;
+  className?: string;
+}) {
+  const safe = value == null ? 0 : Math.max(0, Math.min(100, value));
+  return (
+    <div
+      role="progressbar"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={indeterminate ? undefined : Math.round(safe)}
+      className={cn('h-2 overflow-hidden rounded-full bg-black/10 dark:bg-white/10', className)}
+    >
+      <div
+        className={cn(
+          'h-full rounded-full bg-teal transition-[width] duration-300 ease-out',
+          indeterminate && 'w-[36%] t-progress-indeterminate',
+        )}
+        style={indeterminate ? undefined : { width: `${safe}%` }}
+      />
+    </div>
   );
 }
 
@@ -194,15 +342,21 @@ export function Toggle({
   );
 }
 
-export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputElement>) {
+export function Input({
+  className,
+  invalid,
+  ...rest
+}: InputHTMLAttributes<HTMLInputElement> & { invalid?: boolean }) {
   return (
     <input
+      aria-invalid={invalid || undefined}
       className={cn(
         'w-full bg-sheet border border-hair rounded-xl px-3 py-2 text-[14px]',
         // The border tint alone is too faint to serve as a focus indicator, so
         // keyboard focus also gets a ring; `outline-none` only takes away the
         // native ring, which is replaced by the two above.
         'placeholder:text-muted/60 focus:outline-none focus:border-teal focus-visible:ring-2 focus-visible:ring-teal/40',
+        invalid && 'border-red-400 focus:border-red-500 focus-visible:ring-red-500/30',
         className,
       )}
       {...rest}
@@ -210,22 +364,314 @@ export function Input({ className, ...rest }: InputHTMLAttributes<HTMLInputEleme
   );
 }
 
-export function Select({ className, children, ...rest }: SelectHTMLAttributes<HTMLSelectElement>) {
+/* -------------------------------------------------------------- select */
+
+interface ParsedOption {
+  value: string;
+  label: ReactNode;
+  text: string;
+  disabled: boolean;
+}
+
+function nodeText(node: ReactNode): string {
+  if (typeof node === 'string' || typeof node === 'number') return String(node);
+  if (Array.isArray(node)) return node.map(nodeText).join('');
+  if (isValidElement<{ children?: ReactNode }>(node)) return nodeText(node.props.children);
+  return '';
+}
+
+function parseOptions(children: ReactNode): ParsedOption[] {
+  const options: ParsedOption[] = [];
+
+  const walk = (nodes: ReactNode) => {
+    Children.forEach(nodes, (child) => {
+      if (!isValidElement<{ children?: ReactNode }>(child)) return;
+      if (child.type === Fragment) {
+        walk(child.props.children);
+        return;
+      }
+      if (child.type !== 'option') return;
+      const props = child.props as {
+        value?: string | number;
+        disabled?: boolean;
+        children?: ReactNode;
+      };
+      const text = nodeText(props.children).trim();
+      options.push({
+        value: props.value == null ? text : String(props.value),
+        label: props.children,
+        text,
+        disabled: Boolean(props.disabled),
+      });
+    });
+  };
+
+  walk(children);
+  return options;
+}
+
+type SelectProps = {
+  id?: string;
+  name?: string;
+  className?: string;
+  triggerClassName?: string;
+  value?: string | number;
+  placeholder?: string;
+  disabled?: boolean;
+  invalid?: boolean;
+  children: ReactNode;
+  onChange?: (event: { target: { value: string; name?: string } }) => void;
+  'aria-label'?: string;
+  'aria-labelledby'?: string;
+  'aria-describedby'?: string;
+};
+
+/**
+ * A shadcn-style select: a real button trigger, a portalled listbox, full
+ * keyboard handling and no native `<select>` popup anywhere.
+ */
+export function Select({
+  id,
+  name,
+  className,
+  triggerClassName,
+  value,
+  placeholder = 'Select…',
+  disabled = false,
+  invalid = false,
+  children,
+  onChange,
+  'aria-label': ariaLabel,
+  'aria-labelledby': ariaLabelledBy,
+  'aria-describedby': ariaDescribedBy,
+}: SelectProps) {
+  const [open, setOpen] = useState(false);
+  const [active, setActive] = useState(0);
+  const [rect, setRect] = useState<DOMRect | null>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const listId = useId();
+  const options = parseOptions(children);
+  const valueString = value == null ? '' : String(value);
+  const selectedIndex = options.findIndex((option) => option.value === valueString);
+  const selected = selectedIndex >= 0 ? options[selectedIndex] : null;
+
+  const measure = () => {
+    if (!triggerRef.current) return;
+    setRect(triggerRef.current.getBoundingClientRect());
+  };
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    measure();
+    setActive(selectedIndex >= 0 ? selectedIndex : 0);
+  }, [open, selectedIndex]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const onResize = () => measure();
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (triggerRef.current?.contains(target) || listRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+
+    window.addEventListener('resize', onResize);
+    window.addEventListener('scroll', onResize, true);
+    document.addEventListener('pointerdown', onPointerDown);
+    return () => {
+      window.removeEventListener('resize', onResize);
+      window.removeEventListener('scroll', onResize, true);
+      document.removeEventListener('pointerdown', onPointerDown);
+    };
+  }, [open]);
+
+  const choose = (option: ParsedOption | undefined) => {
+    if (!option || option.disabled) return;
+    setOpen(false);
+    onChange?.({ target: { value: option.value, name } });
+    triggerRef.current?.focus();
+  };
+
+  const move = (delta: number) => {
+    if (options.length === 0) return;
+    let next = active;
+    for (let i = 0; i < options.length; i += 1) {
+      next = (next + delta + options.length) % options.length;
+      if (!options[next].disabled) break;
+    }
+    setActive(next);
+  };
+
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (disabled) return;
+
+    if (!open) {
+      if (['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(event.key)) {
+        event.preventDefault();
+        setOpen(true);
+      }
+      return;
+    }
+
+    switch (event.key) {
+      case 'ArrowDown':
+        event.preventDefault();
+        move(1);
+        break;
+      case 'ArrowUp':
+        event.preventDefault();
+        move(-1);
+        break;
+      case 'Home':
+        event.preventDefault();
+        setActive(0);
+        break;
+      case 'End':
+        event.preventDefault();
+        setActive(options.length - 1);
+        break;
+      case 'Enter':
+      case ' ':
+        event.preventDefault();
+        choose(options[active]);
+        break;
+      case 'Escape':
+      case 'Tab':
+        setOpen(false);
+        break;
+      default:
+        break;
+    }
+  };
+
+  const viewportWidth = typeof window === 'undefined' ? 0 : window.innerWidth;
+  const viewportHeight = typeof window === 'undefined' ? 0 : window.innerHeight;
+  const width = rect ? Math.min(Math.max(rect.width, 176), Math.max(176, viewportWidth - 16)) : 176;
+  const left = rect ? Math.max(8, Math.min(rect.left, viewportWidth - width - 8)) : 0;
+  const listHeight = Math.min(288, Math.max(96, options.length * 42 + 12));
+  const placeAbove = rect ? viewportHeight - rect.bottom < listHeight + 10 && rect.top > viewportHeight - rect.bottom : false;
+  const listStyle = rect
+    ? placeAbove
+      ? { left, width, bottom: viewportHeight - rect.top + 6, maxHeight: Math.min(288, rect.top - 12) }
+      : { left, width, top: rect.bottom + 6, maxHeight: Math.min(288, viewportHeight - rect.bottom - 12) }
+    : undefined;
+
   return (
-    <select
-      className={cn(
-        'w-full bg-sheet border border-hair rounded-xl px-3 py-2 text-[14px]',
-        'focus:outline-none focus:border-teal focus-visible:ring-2 focus-visible:ring-teal/40 cursor-pointer',
-        className,
-      )}
-      {...rest}
-    >
-      {children}
-    </select>
+    <div className={cn('relative', className)}>
+      <button
+        ref={triggerRef}
+        id={id}
+        name={name}
+        type="button"
+        role="combobox"
+        aria-label={ariaLabel}
+        aria-labelledby={ariaLabelledBy}
+        aria-describedby={ariaDescribedBy}
+        aria-invalid={invalid || undefined}
+        aria-expanded={open}
+        aria-controls={open ? listId : undefined}
+        aria-haspopup="listbox"
+        aria-activedescendant={open ? `${listId}-${active}` : undefined}
+        disabled={disabled}
+        onClick={() => (open ? setOpen(false) : setOpen(true))}
+        onKeyDown={onKeyDown}
+        className={cn(
+          'w-full min-h-[38px] inline-flex items-center justify-between gap-2 bg-sheet border border-hair rounded-xl px-3 py-2 text-left text-[14px]',
+          'focus:outline-none focus:border-teal focus-visible:ring-2 focus-visible:ring-teal/40 cursor-pointer',
+          'disabled:opacity-40 disabled:pointer-events-none',
+          invalid && 'border-red-400 focus:border-red-500 focus-visible:ring-red-500/30',
+          open && 'border-teal ring-2 ring-teal/25',
+          triggerClassName,
+        )}
+      >
+        <span className={cn('truncate', !selected && 'text-muted/70')}>
+          {selected?.label ?? placeholder}
+        </span>
+        <ChevronDown
+          className={cn('w-4 h-4 shrink-0 text-muted transition-transform', open && 'rotate-180')}
+          aria-hidden
+        />
+      </button>
+
+      {open &&
+        rect &&
+        listStyle &&
+        createPortal(
+          <div
+            ref={listRef}
+            id={listId}
+            role="listbox"
+            aria-label={ariaLabel}
+            className="fixed z-[80] overflow-y-auto rounded-2xl border border-hair bg-sheet p-1.5 shadow-2xl shadow-black/15 ring-1 ring-black/5 dark:ring-white/10"
+            style={listStyle}
+            onMouseDown={(event) => event.preventDefault()}
+          >
+            {options.map((option, index) => {
+              const isSelected = option.value === valueString;
+              return (
+                <button
+                  key={`${option.value}-${index}`}
+                  id={`${listId}-${index}`}
+                  type="button"
+                  role="option"
+                  aria-selected={isSelected}
+                  disabled={option.disabled}
+                  onMouseEnter={() => setActive(index)}
+                  onClick={() => choose(option)}
+                  className={cn(
+                    'flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-[13px] transition-colors cursor-pointer',
+                    'disabled:opacity-40 disabled:pointer-events-none',
+                    index === active && 'bg-black/5 dark:bg-white/10',
+                    isSelected && 'bg-teal text-white font-semibold hover:bg-teal',
+                  )}
+                >
+                  <Check className={cn('w-3.5 h-3.5 shrink-0', !isSelected && 'opacity-0')} aria-hidden />
+                  <span className="truncate">{option.label}</span>
+                </button>
+              );
+            })}
+          </div>,
+          document.body,
+        )}
+    </div>
   );
 }
 
 /* ---------------------------------------------------------------- misc */
+
+export function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
+  if (bytes >= 1_000_000_000) return `${(bytes / 1_000_000_000).toFixed(1)} GB`;
+  return `${Math.round(bytes / 1_000_000)} MB`;
+}
+
+export function LocalProgressStrip({ progress }: { progress: LocalProgress }) {
+  const percent =
+    progress.total > 0 ? Math.min(100, Math.round((progress.received / progress.total) * 100)) : null;
+  const title =
+    progress.what === 'starting' ? 'Starting the local engine' : `Downloading ${progress.label}`;
+  const detail =
+    progress.what === 'starting'
+      ? 'Loading the model — this takes a moment…'
+      : percent == null
+        ? `${formatBytes(progress.received)} received`
+        : `${percent}% of ${formatBytes(progress.total)}`;
+
+  return (
+    <div className="rounded-2xl border border-hair bg-card px-4 py-3 mb-4">
+      <div className="flex items-center justify-between gap-3 mb-2">
+        <div className="flex items-center gap-2 text-[13px] font-semibold">
+          <Spinner className="w-3.5 h-3.5 text-teal" />
+          {title}
+        </div>
+        <span className="text-[12px] text-muted">{detail}</span>
+      </div>
+      <Progress value={percent ?? undefined} indeterminate={percent == null} />
+    </div>
+  );
+}
 
 /** The floating info/confirmation strip at the top of the sheet. */
 export function Banner({ message, kind }: { message: string; kind: 'info' | 'ok' }) {

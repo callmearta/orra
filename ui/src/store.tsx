@@ -55,6 +55,10 @@ interface Store {
    * read, and only the close button takes it away.
    */
   problem: Problem | null;
+  /** The latest local-engine download/start event, shown globally. */
+  localProgress: api.LocalProgress | null;
+  /** What the user just asked the local engine to do, for button spinners. */
+  localBusy: 'download' | 'use' | 'stop' | null;
   notify: (message: string, kind?: Banner['kind']) => void;
   /** Show a failure. Stays until dismissed. */
   fail: (problem: Problem) => void;
@@ -63,6 +67,9 @@ interface Store {
   update: (patch: Partial<Config>) => void;
   /** Merge a change and save at once, for things that must apply now. */
   updateNow: (patch: Partial<Config>) => Promise<void>;
+  downloadLocalModel: (name: string) => Promise<void>;
+  useLocalModel: (name: string) => Promise<void>;
+  stopLocalEngine: () => Promise<void>;
   refreshStatus: () => Promise<void>;
   refreshHistory: () => Promise<void>;
 }
@@ -88,6 +95,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const [live, setLive] = useState<Live>({ phase: 'idle', final: '', interim: '', level: 0 });
   const [banner, setBanner] = useState<Banner | null>(null);
   const [problem, setProblem] = useState<Problem | null>(null);
+  const [localProgress, setLocalProgress] = useState<api.LocalProgress | null>(null);
+  const [localBusy, setLocalBusy] = useState<'download' | 'use' | 'stop' | null>(null);
 
   const notify = useCallback((message: string, kind: Banner['kind'] = 'info') => {
     setBanner({ message, kind });
@@ -173,7 +182,59 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [write],
   );
 
+  /* --------------------------------------------------- local engine runs */
+
+  const downloadLocalModel = useCallback(
+    async (name: string) => {
+      setLocalBusy('download');
+      try {
+        notify(await api.downloadLocalModel(name), 'ok');
+      } catch (e) {
+        fail(api.problemOf(e));
+      } finally {
+        setLocalBusy(null);
+        setLocalProgress(null);
+        void refreshStatus();
+      }
+    },
+    [fail, notify, refreshStatus],
+  );
+
+  const useLocalModel = useCallback(
+    async (name: string) => {
+      setLocalBusy('use');
+      try {
+        notify(await api.useLocalModel(name), 'ok');
+      } catch (e) {
+        fail(api.problemOf(e));
+      } finally {
+        setLocalBusy(null);
+        setLocalProgress(null);
+        void refreshStatus();
+      }
+    },
+    [fail, notify, refreshStatus],
+  );
+
+  const stopLocalEngine = useCallback(
+    async () => {
+      setLocalBusy('stop');
+      try {
+        await api.stopLocalEngine();
+        notify('The local model has stopped', 'ok');
+      } catch (e) {
+        fail(api.problemOf(e));
+      } finally {
+        setLocalBusy(null);
+        setLocalProgress(null);
+        void refreshStatus();
+      }
+    },
+    [fail, notify, refreshStatus],
+  );
+
   /* --------------------------------------------------------------- boot */
+
 
   useEffect(() => {
     let unlisten: (() => void)[] = [];
@@ -216,6 +277,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             setConfig((c) => (c ? { ...c, language: payload.code } : c));
           }),
           api.listen<void>('history', () => void refreshHistory()),
+          api.listen<api.LocalProgress>('local-download', (payload) =>
+            setLocalProgress(payload.what === 'done' ? null : payload),
+          ),
           api.listen<Problem>('error', (payload) => setProblem(payload)),
           api.listen<void>('status', () => void refreshStatus()),
         ]);
@@ -247,11 +311,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       live,
       banner,
       problem,
+      localProgress,
+      localBusy,
       notify,
       fail,
       dismissProblem,
       update,
       updateNow,
+      downloadLocalModel,
+      useLocalModel,
+      stopLocalEngine,
       refreshStatus,
       refreshHistory,
     }),
@@ -266,11 +335,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       live,
       banner,
       problem,
+      localProgress,
+      localBusy,
       notify,
       fail,
       dismissProblem,
       update,
       updateNow,
+      downloadLocalModel,
+      useLocalModel,
+      stopLocalEngine,
       refreshStatus,
       refreshHistory,
     ],

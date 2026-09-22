@@ -80,3 +80,18 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .t-wave > * { animation: none !important; }
 }
+
+/* Indeterminate progress: a narrow bar that repeatedly sweeps across the rail
+   while the backend has no byte total yet (engine start, unknown-length files). */
+@keyframes t-progress {
+  from { transform: translateX(-115%); }
+  to   { transform: translateX(290%); }
+}
+
+.t-progress-indeterminate {
+  animation: t-progress 1250ms cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .t-progress-indeterminate { animation-duration: 2200ms; }
+}

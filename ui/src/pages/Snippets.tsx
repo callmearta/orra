@@ -1,8 +1,9 @@
 import { Plus, Trash2 } from 'lucide-react';
 
-import { Button, Card, Divider, Empty, Input, PageHeading, SectionTitle } from '@/components/ui';
+import { Button, Card, Divider, Empty, FieldError, Input, PageHeading, SectionTitle } from '@/components/ui';
 import type { Rule } from '@/lib/api';
 import { num } from '@/lib/stats';
+import { blank, duplicate } from '@/lib/validation';
 import { useStore } from '@/store';
 
 /**
@@ -17,6 +18,11 @@ export default function SnippetsPage() {
   const rules = config.replacements;
 
   const write = (next: Rule[]) => update({ replacements: next });
+  const fromError = (rule: Rule) =>
+    blank(rule.from)
+      ? 'Add the words Orra should replace.'
+      : duplicate(rule.from, rules.map((item) => item.from), 'This phrase');
+  const toError = (rule: Rule) => (blank(rule.to) ? 'Add what it should be replaced with.' : null);
 
   return (
     <>
@@ -45,29 +51,37 @@ export default function SnippetsPage() {
             {rules.map((rule, index) => (
               <div key={index}>
                 {index > 0 && <Divider />}
-                <div className="flex items-center gap-3">
-                  <Input
-                    aria-label={`Heard as, rule ${index + 1}`}
-                    placeholder="heard as…"
-                    value={rule.from}
-                    onChange={(e) => {
-                      const next = [...rules];
-                      next[index] = { ...rule, from: e.target.value };
-                      write(next);
-                    }}
-                  />
-                  <span className="text-muted shrink-0">→</span>
+                <div className="flex items-start gap-3">
+                  <div className="flex-1">
+                    <Input
+                      aria-label={`Heard as, rule ${index + 1}`}
+                      placeholder="heard as…"
+                      value={rule.from}
+                      invalid={!!fromError(rule)}
+                      onChange={(e) => {
+                        const next = [...rules];
+                        next[index] = { ...rule, from: e.target.value };
+                        write(next);
+                      }}
+                    />
+                    <FieldError>{fromError(rule)}</FieldError>
+                  </div>
+                  <span className="text-muted shrink-0 pt-2">→</span>
                   {/* The replacement is free text, so newlines are allowed. */}
-                  <Input
-                    aria-label={`Replace with, rule ${index + 1}`}
-                    placeholder="replace with…"
-                    value={rule.to}
-                    onChange={(e) => {
-                      const next = [...rules];
-                      next[index] = { ...rule, to: e.target.value };
-                      write(next);
-                    }}
-                  />
+                  <div className="flex-1">
+                    <Input
+                      aria-label={`Replace with, rule ${index + 1}`}
+                      placeholder="replace with…"
+                      value={rule.to}
+                      invalid={!!toError(rule)}
+                      onChange={(e) => {
+                        const next = [...rules];
+                        next[index] = { ...rule, to: e.target.value };
+                        write(next);
+                      }}
+                    />
+                    <FieldError>{toError(rule)}</FieldError>
+                  </div>
                   <Button
                     variant="mini"
                     aria-label={`Remove rule ${index + 1}`}

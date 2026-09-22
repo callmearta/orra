@@ -9,15 +9,24 @@ import { useStore } from '@/store';
 export default function TranscriptsPage() {
   const { history, notify, fail, refreshHistory } = useStore();
   const [confirmingClear, setConfirmingClear] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
 
   const totalWords = history.reduce((n, e) => n + e.words, 0);
 
-  const run = async (what: string, action: () => Promise<unknown>) => {
+  const run = async (key: string, what: string, action: () => Promise<unknown>) => {
+    setBusy(key);
     try {
       await action();
-      if (what) notify(what, 'ok');
+      if (what) {
+        notify(what, 'ok');
+        setDone(key);
+        window.setTimeout(() => setDone((current) => (current === key ? null : current)), 1600);
+      }
     } catch (e) {
       fail(api.problemOf(e));
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -50,8 +59,10 @@ export default function TranscriptsPage() {
             <div className="flex gap-2">
               <Button
                 variant="danger"
+                loading={busy === 'clear'}
+                loadingText="Clearing…"
                 onClick={() =>
-                  run('History cleared', async () => {
+                  run('clear', 'History cleared', async () => {
                     await api.clearHistory();
                     await refreshHistory();
                     setConfirmingClear(false);
@@ -124,8 +135,12 @@ export default function TranscriptsPage() {
             <div className="flex flex-wrap gap-2 mt-4">
               <Button
                 variant="mini"
+                loading={busy === `copy-${entry.id}`}
+                loadingText="Copying…"
+                status={done === `copy-${entry.id}` ? 'success' : 'idle'}
+                statusText="Copied"
                 onClick={() =>
-                  run('Copied', () => navigator.clipboard.writeText(entry.text))
+                  run(`copy-${entry.id}`, 'Copied', () => navigator.clipboard.writeText(entry.text))
                 }
               >
                 <ClipboardCopy className="w-3.5 h-3.5" />
@@ -133,21 +148,34 @@ export default function TranscriptsPage() {
               </Button>
               <Button
                 variant="mini"
+                loading={busy === `insert-${entry.id}`}
+                loadingText="Inserting…"
+                status={done === `insert-${entry.id}` ? 'success' : 'idle'}
+                statusText="Inserted"
                 onClick={() =>
-                  run('Inserted into the focused window', () => api.reinject(entry.id))
+                  run(`insert-${entry.id}`, 'Inserted into the focused window', () => api.reinject(entry.id))
                 }
               >
                 <CornerDownLeft className="w-3.5 h-3.5" />
                 Insert
               </Button>
-              <Button variant="mini" onClick={() => run('', () => api.speak(entry.text))}>
+              <Button
+                variant="mini"
+                loading={busy === `speak-${entry.id}`}
+                loadingText="Speaking…"
+                status={done === `speak-${entry.id}` ? 'success' : 'idle'}
+                statusText="Spoken"
+                onClick={() => run(`speak-${entry.id}`, '', () => api.speak(entry.text))}
+              >
                 <Volume2 className="w-3.5 h-3.5" />
                 Read aloud
               </Button>
               <Button
                 variant="mini"
+                loading={busy === `delete-${entry.id}`}
+                loadingText="Deleting…"
                 onClick={() =>
-                  run('', async () => {
+                  run(`delete-${entry.id}`, '', async () => {
                     await api.deleteHistory(entry.id);
                     await refreshHistory();
                   })

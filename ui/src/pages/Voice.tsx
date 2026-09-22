@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Plus, Volume2 } from 'lucide-react';
 
 import { ModelField } from '@/components/ModelField';
@@ -6,24 +7,27 @@ import {
   Card,
   Divider,
   Empty,
+  FieldError,
   Label,
   PageHeading,
   Row,
   SectionTitle,
   Select,
+  Tag,
   Toggle,
 } from '@/components/ui';
 import * as api from '@/lib/api';
 import { LANGUAGES, STT_MODELS, TTS_VOICES, languageLabel } from '@/lib/deepgram-catalog';
 import { languagesFor } from '@/lib/languages';
 import { ASSEMBLYAI_LANGUAGES } from '@/lib/translate-catalog';
+import { languageCycleError, required } from '@/lib/validation';
 import { useStore } from '@/store';
 
 
 /**
  * Which ears and which mouth the app uses.
  *
- * A `<select>` cannot show an option that is no longer in the catalogue, so a
+ * A custom select cannot show an option that is no longer in the catalogue, so a
  * value saved by another build is appended rather than silently dropped.
  */
 function optionsWith(pairs: [string, string][], current: string, describe: boolean) {
@@ -44,9 +48,19 @@ function optionsWith(pairs: [string, string][], current: string, describe: boole
 
 export default function VoicePage() {
   const { config, status, mics, fail, update } = useStore();
+  const [testingVoice, setTestingVoice] = useState(false);
+  const [voiceOk, setVoiceOk] = useState(false);
+  const [newLanguage, setNewLanguage] = useState(LANGUAGES[0][0]);
   if (!config) return null;
 
   const cycle = config.language_cycle;
+  const availableLanguages = LANGUAGES.filter(([code]) => !cycle.includes(code));
+  useEffect(() => {
+    if (availableLanguages.length === 0) return;
+    if (!availableLanguages.some(([code]) => code === newLanguage)) {
+      setNewLanguage(availableLanguages[0][0]);
+    }
+  }, [availableLanguages, newLanguage]);
   // Model, language codes and keyterms are Deepgram's; the other providers
   // choose those for themselves, so showing the pickers would be a lie.
   const deepgram = config.provider === 'deepgram';
@@ -65,6 +79,10 @@ export default function VoicePage() {
   const aaLanguage = aaSupported ? config.language : '';
 
   const setCycle = (next: string[]) => update({ language_cycle: next });
+  const cycleError = languageCycleError(cycle);
+  const sttModelError = deepgram ? required(config.stt_model, 'Model') : null;
+  const languageError = deepgram || assemblyai || selfHosted ? required(config.language, 'Language') : null;
+  const ttsVoiceError = config.tts_enabled ? required(config.tts_model, 'Voice') : null;
 
   return (
     <>
@@ -83,10 +101,12 @@ export default function VoicePage() {
                 <Select
                   id="stt-model"
                   value={config.stt_model}
+                  invalid={!!sttModelError}
                   onChange={(e) => update({ stt_model: e.target.value })}
                 >
                   {optionsWith(STT_MODELS, config.stt_model, false)}
                 </Select>
+                <FieldError>{sttModelError}</FieldError>
               </div>
             )}
             <div>
@@ -95,6 +115,7 @@ export default function VoicePage() {
                 <Select
                   id="language"
                   value={aaLanguage}
+                  invalid={!!languageError}
                   onChange={(e) => update({ language: e.target.value })}
                 >
                   <option value="">Automatic — no steering</option>
@@ -108,6 +129,7 @@ export default function VoicePage() {
                 <Select
                   id="language"
                   value={config.language}
+                  invalid={!!languageError}
                   onChange={(e) => update({ language: e.target.value })}
                 >
                   {optionsWith(LANGUAGES, config.language, true)}
@@ -127,6 +149,7 @@ export default function VoicePage() {
                   )}
                 </p>
               )}
+              <FieldError>{languageError}</FieldError>
             </div>
           </div>
         ) : selfHosted ? (
@@ -153,15 +176,19 @@ export default function VoicePage() {
               <Select
                 id="language"
                 value={config.language}
+                invalid={!!languageError}
                 onChange={(e) => update({ language: e.target.value })}
               >
                 {optionsWith(languagesFor(config.provider), config.language, true)}
               </Select>
-              <p className="text-[12px] text-muted mt-1.5">
-                A hint, not a filter: a whisper model detects the language on its own, and picking
-                one mostly saves it the guesswork. The spoken commands and replacements further down
-                this page are English words either way.
-              </p>
+              <FieldError>{languageError}</FieldError>
+              {!languageError && (
+                <p className="text-[12px] text-muted mt-1.5">
+                  A hint, not a filter: a whisper model detects the language on its own, and picking
+                  one mostly saves it the guesswork. The spoken commands and replacements further down
+                  this page are English words either way.
+                </p>
+              )}
             </div>
           </div>
         ) : (
@@ -206,36 +233,38 @@ export default function VoicePage() {
               }
             />
 
-            <div className="flex flex-col">
-              {cycle.length === 0 && <Empty>The language key has nothing to step through.</Empty>}
+            <div className="flex flex-wrap items-center gap-2">
+              {cycle.length === 0 && (
+                <Empty>The language key has nothing to step through.</Empty>
+              )}
               {cycle.map((code, index) => (
-                <div key={index} className="flex items-center gap-3 mt-3">
-                  <Select
-                    aria-label={`Language ${index + 1}`}
-                    value={code}
-                    onChange={(e) => {
-                      const next = [...cycle];
-                      next[index] = e.target.value;
-                      setCycle(next);
-                    }}
-                  >
-                    {optionsWith(LANGUAGES, code, true)}
-                  </Select>
-                  <Button
-                    variant="mini"
-                    className="shrink-0"
-                    onClick={() => setCycle(cycle.filter((_, i) => i !== index))}
-                  >
-                    Remove
-                  </Button>
-                </div>
+                <Tag
+                  key={`${code}-${index}`}
+                  removeLabel={`Remove ${languageLabel(code)}`}
+                  onRemove={() => setCycle(cycle.filter((_, i) => i !== index))}
+                >
+                  <span className="px-1.5 py-0.5 text-ink">{languageLabel(code)}</span>
+                </Tag>
               ))}
             </div>
+            <FieldError>{cycleError}</FieldError>
 
-            <div>
-              <Button onClick={() => setCycle([...cycle, LANGUAGES[0][0]])}>
+            <div className="flex flex-wrap items-center gap-2">
+              <Select
+                aria-label="Language to add"
+                value={newLanguage}
+                className="w-auto"
+                disabled={availableLanguages.length === 0}
+                onChange={(e) => setNewLanguage(e.target.value)}
+              >
+                {optionsWith(availableLanguages, newLanguage, true)}
+              </Select>
+              <Button
+                disabled={availableLanguages.length === 0 || cycle.includes(newLanguage)}
+                onClick={() => setCycle([...cycle, newLanguage])}
+              >
                 <Plus className="w-4 h-4" />
-                Add language code
+                Add language
               </Button>
             </div>
           </>
@@ -260,19 +289,30 @@ export default function VoicePage() {
           <Select
             id="tts-model"
             value={config.tts_model}
+            invalid={!!ttsVoiceError}
             onChange={(e) => update({ tts_model: e.target.value })}
           >
             {optionsWith(TTS_VOICES, config.tts_model, false)}
           </Select>
+          <FieldError>{ttsVoiceError}</FieldError>
         </div>
         <div>
           <Button
-            disabled={!config.tts_enabled}
+            disabled={!config.tts_enabled || !!ttsVoiceError}
+            loading={testingVoice}
+            loadingText="Speaking…"
+            status={voiceOk ? 'success' : 'idle'}
+            statusText="Heard"
             onClick={async () => {
+              setTestingVoice(true);
+              setVoiceOk(false);
               try {
                 await api.speak('This is Orra reading your words back to you.');
+                setVoiceOk(true);
               } catch (e) {
                 fail(api.problemOf(e));
+              } finally {
+                setTestingVoice(false);
               }
             }}
           >

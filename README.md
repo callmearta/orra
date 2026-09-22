@@ -14,6 +14,12 @@ codebase builds for Linux, macOS and Windows.
   transcript is typed the moment you release the key.
 - **Interchangeable providers.** Pick on cost, accuracy and the shape of the
   transcript — including [a model on your own machine](#local-models).
+- **One-click local models.** Orra can download whisper.cpp and a model, run it
+  itself, and fill in the local-server settings for you. Download and start
+  progress are shown in the UI.
+- **More than dictation.** Translation, read-aloud, a voice dictionary, snippets
+  and shortcuts, language switching, floating transcript, history and insights
+  are all built in.
 - **Local by default.** Settings and history never leave your machine. Only the
   audio you dictate goes to the provider you chose — see
   [Privacy](#privacy-and-what-leaves-your-machine).
@@ -363,9 +369,23 @@ something it has always answered. A dedicated whisper server is the safer
 choice.
 
 **Orra — open-source models** is the entry that needs nothing installed first.
-Pick a model, press **Download**, then **Use this model**, and Orra fetches the
-engine ([whisper.cpp](https://github.com/ggml-org/whisper.cpp)) and the weights,
-starts the server itself, and fills in the address and the transport to match.
+
+### Quick start: the built-in local model
+
+1. Open **Settings → Transcription service**.
+2. Set **Provider** to **Orra — open-source models**. The address and transport
+   are filled in for you.
+3. Pick a model from the list. Press **Download**; Orra shows the download in a
+   progress bar, including the percentage and size when the server reports it.
+4. Press **Use this model** when the download finishes. The button reports
+   "Starting…" while the engine loads the weights.
+5. Press **Check server** to transcribe a moment of silence. A pass means the
+   address, model, engine and local loopback are all working. Press **Stop** to
+   stop the engine; the downloaded weights stay on disk.
+
+Orra fetches the engine ([whisper.cpp](https://github.com/ggml-org/whisper.cpp))
+and the weights, starts the server itself, and fills in the address and the
+transport to match.
 Nothing is added to the app bundle: the weights land in
 `~/.local/share/orra/models` and the engine in `~/.local/share/orra/bin`, both
 checked against a sha256 pinned in the binary as they arrive — one of them is

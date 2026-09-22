@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { CircleStop, Play, Square, Volume2 } from 'lucide-react';
 
 import { LanguagePicker } from '@/components/LanguagePicker';
@@ -9,6 +10,7 @@ import { useStore } from '@/store';
 
 export default function DictatePage({ onOpenSettings }: { onOpenSettings: () => void }) {
   const { config, status, insights, history, live, notify, fail } = useStore();
+  const [action, setAction] = useState<'dictate' | 'read' | 'stop-speaking' | 'language' | null>(null);
   if (!config) return null;
 
   const recording = live.phase === 'recording';
@@ -18,29 +20,49 @@ export default function DictatePage({ onOpenSettings }: { onOpenSettings: () => 
   const phase = speaking ? 'Speaking' : recording ? 'Listening' : busy ? 'Finishing' : 'Ready';
 
   const dictate = async () => {
+    setAction('dictate');
     try {
       await (recording ? api.stopDictation() : api.startDictation());
     } catch (e) {
       fail(api.problemOf(e));
+    } finally {
+      setAction(null);
     }
   };
 
   const readAloud = async () => {
     const latest = history[0];
     if (!latest) return;
+    setAction('read');
     try {
       await api.speak(latest.text);
     } catch (e) {
       fail(api.problemOf(e));
+    } finally {
+      setAction(null);
+    }
+  };
+
+  const stopSpeaking = async () => {
+    setAction('stop-speaking');
+    try {
+      await api.stopSpeaking();
+    } catch (e) {
+      fail(api.problemOf(e));
+    } finally {
+      setAction(null);
     }
   };
 
   const setLanguage = async (code: string) => {
+    setAction('language');
     try {
       await api.setLanguage(code);
       notify(`Language: ${languageName(code, languages)}`, 'ok');
     } catch (e) {
       fail(api.problemOf(e));
+    } finally {
+      setAction(null);
     }
   };
 
@@ -114,16 +136,33 @@ export default function DictatePage({ onOpenSettings }: { onOpenSettings: () => 
           </div>
 
           <div className="flex flex-wrap items-center justify-center gap-2.5">
-            <Button variant="primary" onClick={dictate}>
+            <Button
+              variant="primary"
+              onClick={dictate}
+              loading={action === 'dictate'}
+              loadingText={recording ? 'Stopping…' : 'Starting…'}
+              status={recording ? 'active' : 'idle'}
+            >
               {recording ? <Square className="w-4 h-4" /> : <Play className="w-4 h-4" />}
               {recording ? 'Stop dictation' : 'Start dictation'}
             </Button>
-            <Button onClick={readAloud} disabled={history.length === 0}>
+            <Button
+              onClick={readAloud}
+              disabled={history.length === 0}
+              loading={action === 'read'}
+              loadingText="Speaking…"
+              status={speaking ? 'active' : 'idle'}
+              statusText="Reading"
+            >
               <Volume2 className="w-4 h-4" />
               Read last aloud
             </Button>
             {speaking && (
-              <Button onClick={() => void api.stopSpeaking()}>
+              <Button
+                onClick={() => void stopSpeaking()}
+                loading={action === 'stop-speaking'}
+                loadingText="Stopping…"
+              >
                 <CircleStop className="w-4 h-4" />
                 Stop reading
               </Button>
@@ -132,6 +171,7 @@ export default function DictatePage({ onOpenSettings }: { onOpenSettings: () => 
               <LanguagePicker
                 current={config.language}
                 options={languages}
+                loading={action === 'language'}
                 note={
                   selfHosted
                     ? 'A whisper model works out the language on its own; picking one mostly saves it the guesswork. The dictation language applies the moment you choose it.'
