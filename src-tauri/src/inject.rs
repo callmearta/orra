@@ -112,7 +112,7 @@ fn which(cmd: &str) -> bool {
 /// the tools are all out there and none of them are in here — and the answer is
 /// wanted on the way to every keystroke. So it is asked once, in a single call
 /// that checks all of them, and the answer is kept.
-#[cfg(target_os = "linux")]
+#[cfg(not(target_os = "windows"))]
 fn host_has(cmd: &str) -> bool {
     use std::sync::OnceLock;
     static HOST_TOOLS: OnceLock<Vec<String>> = OnceLock::new();
@@ -1133,6 +1133,7 @@ fn paste_text(text: &str, restore: bool) -> Result<()> {
     // In a sandbox the whole paste goes to the machine in one piece, because
     // every step of it is a spawn and the windows between them are where the
     // wrong clipboard gets pasted. See `HOST_INJECT_SCRIPT`.
+    #[cfg(not(target_os = "windows"))]
     if crate::config::flatpak_id().is_some() {
         return host_paste(text, restore);
     }
@@ -1256,16 +1257,19 @@ pub fn warm_up() {
 // sending the keystroke.
 
 /// The injector written for the host to run.
+#[cfg(not(target_os = "windows"))]
 const HOST_INJECT: &str = "orra-inject";
 
 /// Where the transcript is put for the helper to read.
 ///
 /// A file rather than stdin: it is one less thing to get wrong across the
 /// spawn, and it is already in a directory the host can see.
+#[cfg(not(target_os = "windows"))]
 fn pending_path() -> std::path::PathBuf {
     crate::config::config_dir().join("orra-pending")
 }
 
+#[cfg(not(target_os = "windows"))]
 fn write_host_helper() -> Result<()> {
     let path = crate::config::config_dir().join(HOST_INJECT);
     std::fs::write(&path, HOST_INJECT_SCRIPT)
@@ -1281,6 +1285,7 @@ fn write_host_helper() -> Result<()> {
 }
 
 /// Written to the app's config directory, where the host can run it.
+#[cfg(not(target_os = "windows"))]
 const HOST_INJECT_SCRIPT: &str = r#"#!/bin/bash
 # Written by Orra. Runs on the machine, not in the sandbox.
 #
@@ -1343,6 +1348,7 @@ esac
 "#;
 
 /// Hand the paste to the machine, whole.
+#[cfg(not(target_os = "windows"))]
 fn host_paste(text: &str, restore: bool) -> Result<()> {
     let file = pending_path();
     std::fs::write(&file, text)?;
@@ -1358,6 +1364,7 @@ fn host_paste(text: &str, restore: bool) -> Result<()> {
 }
 
 /// Type the text out on the machine.
+#[cfg(not(target_os = "windows"))]
 fn host_type(text: &str) -> Result<()> {
     let file = pending_path();
     std::fs::write(&file, text)?;
