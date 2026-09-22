@@ -465,6 +465,18 @@ pub fn is_hyprland() -> bool {
     std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
 }
 
+/// The Flatpak app id when running inside one, `None` otherwise.
+///
+/// Not a curiosity: a sandbox's `orra-ctl` sits at `/app/bin/orra-ctl`, a path
+/// that does not exist on the host, so a compositor bind pointing at it would
+/// fail every time. With this the bind goes through `flatpak run` instead,
+/// which re-enters the sandbox and finds both the binary and the config — the
+/// port and token live in the sandbox's own copy, and a host-side binary would
+/// read the wrong one and be turned away.
+pub fn flatpak_id() -> Option<String> {
+    std::env::var("FLATPAK_ID").ok().filter(|id| !id.is_empty())
+}
+
 // ---------------------------------------------------------------------------
 // load / save
 // ---------------------------------------------------------------------------

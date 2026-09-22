@@ -1,0 +1,12 @@
+[Desktop Entry]
+Categories=Office;
+Comment=Voice dictation for your whole desktop
+Exec=orra
+StartupWMClass=orra
+# The app id, not the app name: the icon is installed under this name inside
+# the sandbox, and anything else leaves a blank square in the dock.
+Icon=ai.orra.desktop
+Name=Orra
+Terminal=false
+Type=Application
+Keywords=dictation;speech;voice;transcription;

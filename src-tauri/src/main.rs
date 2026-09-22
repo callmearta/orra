@@ -105,13 +105,18 @@ fn main() {
 
             fit_main_to_screen(app);
             build_hud(&handle, cfg.hud)?;
-            build_tray(&handle)?;
+            build_tray_or_carry_on(&handle);
             watch_state_for_hud(&handle);
 
             // Keep the autostart entry pointing at wherever the binary lives now.
             if cfg.launch_at_login {
                 let _ = commands::set_launch_at_login(true);
             }
+
+            // A sandbox has no wtype to type with, and a uinput keyboard takes
+            // a moment to be enumerated by the compositor — long enough that
+            // building it on the first transcript would lose that transcript.
+            inject::warm_up();
 
             // Bring up the local model this app is responsible for, if any. On
             // its own thread: starting it means loading the weights, which is
@@ -263,6 +268,26 @@ fn build_hud(app: &AppHandle, visible: bool) -> tauri::Result<()> {
         let _ = hud.hide();
     }
     Ok(())
+}
+
+/// Put the tray icon up, or say why there is none and carry on.
+///
+/// The tray library is `dlopen`ed rather than linked, so a machine without it
+/// builds and starts perfectly and then dies inside the loader — a panic, not
+/// an error, which is why this catches rather than just checking the `Result`.
+/// Nothing about dictation needs a tray: the hotkey, the overlay and the
+/// settings window all work without one, and in a Flatpak the library is not
+/// part of the runtime, so the choice is this or refusing to run at all.
+fn build_tray_or_carry_on(app: &AppHandle) {
+    let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_tray(app)));
+    match built {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("[orra] no tray icon: {e}"),
+        Err(_) => eprintln!(
+            "[orra] no tray icon: libayatana-appindicator3 is not installed. \
+             Everything else still works; quit from the settings window."
+        ),
+    }
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {

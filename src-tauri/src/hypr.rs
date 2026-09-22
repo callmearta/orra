@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 
 use crate::config::{self, Config, Mode};
 
@@ -28,6 +28,30 @@ pub fn ctl_path() -> PathBuf {
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("orra-ctl")))
         .unwrap_or_else(|| PathBuf::from("orra-ctl"))
+}
+
+/// The command a bind runs, ready for the arguments to be appended.
+///
+/// Inside a Flatpak this cannot be a path. The bind is executed by Hyprland on
+/// the *host*, where `/app/bin/orra-ctl` does not exist, so it goes back
+/// through `flatpak run` — which re-enters the sandbox and finds the binary
+/// beside the app, reading the sandbox's own config for the port and token.
+/// A `flatpak run` costs about 60ms, which is paid once on the press and once
+/// on the release: not enough to clip the first word, and far less than the
+/// alternative of holding a second copy of the binary on the host, which would
+/// have to be built against the host's libc to be runnable there.
+pub fn ctl_invocation() -> String {
+    match config::flatpak_id() {
+        Some(id) => flatpak_invocation(&id),
+        None => ctl_path().display().to_string(),
+    }
+}
+
+/// Split from the environment lookup so the one string the bind depends on can
+/// be checked without a sandbox to run in — this is what a compositor will
+/// execute on every keypress, and it cannot be tested by hand from here.
+fn flatpak_invocation(app_id: &str) -> String {
+    format!("flatpak run --command=orra-ctl {app_id}")
 }
 
 /// Quote a value for a Lua string literal.
@@ -57,7 +81,7 @@ fn lua_string(value: &str) -> String {
 }
 
 fn keybind_block(cfg: &Config) -> String {
-    let ctl = ctl_path().display().to_string();
+    let ctl = ctl_invocation();
     // A full `exec_cmd` argument: the quoted path plus the command word.
     fn exec(ctl: &str, args: &str) -> String {
         lua_string(&format!("{ctl} {args}"))
@@ -171,6 +195,10 @@ pub fn apply(cfg: &Config) -> Result<String> {
         return Ok("Not running under Hyprland — using the global shortcut plugin instead.".into());
     }
 
+    // Before anything is written, not after: a compositor that cannot be
+    // reached must not leave the user's config half-applied.
+    reachable()?;
+
     write_block(&keybinds_path(), &keybind_block(cfg))?;
     if cfg.hud {
         write_block(&settings_path(), &hud_rule_block())?;
@@ -181,7 +209,7 @@ pub fn apply(cfg: &Config) -> Result<String> {
     reload()?;
 
     // Surface parse errors instead of letting the user discover them later.
-    let errs = hyprctl(&["configerrors"])?;
+    let errs = ask("configerrors")?;
     let errs = errs.trim();
     if !errs.is_empty() && errs != "no errors" {
         return Ok(format!("Applied, but Hyprland reported config errors: {errs}"));
@@ -190,15 +218,70 @@ pub fn apply(cfg: &Config) -> Result<String> {
 }
 
 fn reload() -> Result<()> {
-    hyprctl(&["reload"]).map(|_| ())
+    ask("reload").map(|_| ())
 }
 
-fn hyprctl(args: &[&str]) -> Result<String> {
-    let out = std::process::Command::new("hyprctl")
-        .args(args)
-        .output()
-        .context("running hyprctl")?;
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+/// Where Hyprland's command socket lives for this instance.
+///
+/// `XDG_RUNTIME_DIR` is the only place it can be, and the instance signature is
+/// what keeps a second compositor from being talked to by mistake.
+fn socket_path() -> Result<PathBuf> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .ok_or_else(|| anyhow!("XDG_RUNTIME_DIR is not set"))?;
+    let signature = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")
+        .ok_or_else(|| anyhow!("HYPRLAND_INSTANCE_SIGNATURE is not set"))?;
+    Ok(socket_in(Path::new(&runtime), &signature))
+}
+
+/// The layout itself, split out from the environment so it can be checked
+/// without a compositor to read the variables from.
+fn socket_in(runtime: &Path, signature: &std::ffi::OsStr) -> PathBuf {
+    runtime.join("hypr").join(signature).join(".socket.sock")
+}
+
+/// Check that Hyprland can be reached at all, before its config is touched.
+///
+/// `hyprctl` used to fail *after* the managed block had already been written,
+/// which left the user's config edited and unapplied with nothing said about
+/// it. Asking first means a compositor that cannot be reached costs nothing.
+fn reachable() -> Result<()> {
+    #[cfg(unix)]
+    {
+        let path = socket_path()?;
+        std::os::unix::net::UnixStream::connect(&path)
+            .with_context(|| format!("connecting to {}", path.display()))?;
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    Err(anyhow!("Hyprland talks over a unix socket, which this platform has not got"))
+}
+
+/// Ask Hyprland something over its own command socket.
+///
+/// This is the whole of what `hyprctl` does. The binary cannot come along to a
+/// sandbox — it links libhyprutils, libhyprwire, libre2 and libreadline, none
+/// of which exist in a Flatpak runtime — but the protocol underneath is a line
+/// written to a unix socket and the reply read back to EOF, with `j/` in front
+/// of a command asking for JSON. That works from inside the sandbox with
+/// `--filesystem=xdg-run/hypr`, and drops a subprocess from the native build.
+pub(crate) fn ask(command: &str) -> Result<String> {
+    #[cfg(unix)]
+    {
+        use std::io::{Read, Write};
+
+        let path = socket_path()?;
+        let mut stream = std::os::unix::net::UnixStream::connect(&path)
+            .with_context(|| format!("connecting to {}", path.display()))?;
+        stream.write_all(command.as_bytes())?;
+        // Hyprland closes its side when the reply is done, so there is no
+        // length to read first. Decoded lossily: a window title can carry
+        // bytes that are not UTF-8, and that is not a reason to fail.
+        let mut reply = Vec::new();
+        stream.read_to_end(&mut reply).with_context(|| format!("reading {command}"))?;
+        Ok(String::from_utf8_lossy(&reply).to_string())
+    }
+    #[cfg(not(unix))]
+    Err(anyhow!("Hyprland talks over a unix socket, which this platform has not got"))
 }
 
 // ---------------------------------------------------------------------------
@@ -265,6 +348,26 @@ mod tests {
 
     use super::*;
     use crate::config::Provider;
+
+    /// What a sandboxed install writes into the bind. It has to name the
+    /// subcommand and the app id, because the host has no `orra-ctl` to call
+    /// and no other way to reach the one inside the sandbox.
+    #[test]
+    fn a_sandboxed_bind_re_enters_the_flatpak() {
+        assert_eq!(
+            flatpak_invocation("ai.orra.desktop"),
+            "flatpak run --command=orra-ctl ai.orra.desktop"
+        );
+    }
+
+    /// The socket path is the whole contract with Hyprland: get it wrong and
+    /// every call fails, which for `apply` means the user's keybinds silently
+    /// stop being written.
+    #[test]
+    fn the_command_socket_is_where_hyprland_puts_it() {
+        let path = socket_in(Path::new("/run/user/1000"), std::ffi::OsStr::new("abc123"));
+        assert_eq!(path, PathBuf::from("/run/user/1000/hypr/abc123/.socket.sock"));
+    }
 
     #[test]
     fn block_is_appended_once_and_replaced_on_reapply() {

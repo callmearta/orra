@@ -30,3 +30,9 @@ Thumbs.db
 *.swo
 .idea/
 .vscode/
+
+# Flatpak build outputs: a bundle is a release asset, not source.
+/packaging/flatpak/build/
+/packaging/flatpak/repo/
+/packaging/flatpak/stage/
+*.flatpak

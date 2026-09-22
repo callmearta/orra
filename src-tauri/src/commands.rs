@@ -389,9 +389,18 @@ pub fn set_launch_at_login(enabled: bool) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
         let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
-        let dir = match std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
-            Some(d) => std::path::PathBuf::from(d),
-            None => std::path::PathBuf::from(home).join(".config"),
+
+        // Both halves of the entry have to survive on the host. A session reads
+        // autostart from its own ~/.config, and `XDG_CONFIG_HOME` is redirected
+        // inside a sandbox, so an entry written to the redirected path is never
+        // read; the executable has the same problem from the other side, since
+        // the host cannot run a path that only exists in the sandbox. So a
+        // sandboxed entry names `flatpak run` and writes to the real home.
+        let flatpak = crate::config::flatpak_id();
+        let dir = match (flatpak.is_some(), std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty())) {
+            (true, _) => std::path::PathBuf::from(&home).join(".config"),
+            (false, Some(d)) => std::path::PathBuf::from(d),
+            (false, None) => std::path::PathBuf::from(&home).join(".config"),
         }
         .join("autostart");
         let file = dir.join("orra.desktop");
@@ -401,17 +410,22 @@ pub fn set_launch_at_login(enabled: bool) -> Result<(), String> {
             return Ok(());
         }
 
-        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let command = match &flatpak {
+            Some(id) => format!("flatpak run {id}"),
+            None => std::env::current_exe()
+                .map_err(|e| e.to_string())?
+                .display()
+                .to_string(),
+        };
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let entry = format!(
             "[Desktop Entry]\n\
              Type=Application\n\
              Name=Orra\n\
              Comment=Voice dictation for your whole desktop\n\
-             Exec={}\n\
+             Exec={command}\n\
              Terminal=false\n\
-             X-GNOME-Autostart-enabled=true\n",
-            exe.display()
+             X-GNOME-Autostart-enabled=true\n"
         );
         std::fs::write(&file, entry).map_err(|e| e.to_string())
     }

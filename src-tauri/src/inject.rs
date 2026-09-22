@@ -80,6 +80,395 @@ fn which(cmd: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// uinput
+// ---------------------------------------------------------------------------
+//
+// The last resort on Linux, and the only thing that works inside a Flatpak.
+//
+// Flatpak stamps its Wayland connection with a security context, and
+// compositors hide the privileged protocols from clients carrying one.
+// `zwp_virtual_keyboard_manager_v1` — wtype's entire mechanism — is among them,
+// which is why bundling wtype in a sandbox achieves nothing. Sway and the rest
+// of wlroots filter the same way, and Mutter and KWin never implemented the
+// protocol at all, so there was never a compositor where bundling it helped.
+//
+// uinput is a different road: the app asks the *kernel* for a keyboard, and the
+// compositor picks it up through libinput exactly as it would a real one. That
+// works from inside a sandbox, identically on every compositor, and needs no
+// host binary — at the cost of `--device=all` in the Flatpak manifest.
+//
+// It types through the *active* keyboard layout, so it can only reach
+// characters that layout has keys for. `type_text` handles that by handing
+// anything non-ASCII to the clipboard instead.
+#[cfg(target_os = "linux")]
+mod uinput {
+    use std::fs::{File, OpenOptions};
+    use std::os::fd::AsRawFd;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::Duration;
+
+    use anyhow::{anyhow, Result};
+
+    /// How long a key is held down, and the pause after releasing it.
+    ///
+    /// A press and release written in the same instant can be coalesced away
+    /// before the compositor ever sees a keystroke. `wtype -d 2` paces itself
+    /// for the same reason; this is slower because it is a system call per
+    /// event rather than one batch.
+    const HOLD: Duration = Duration::from_millis(8);
+    const GAP: Duration = Duration::from_millis(6);
+
+    /// How long to let the compositor notice a freshly created keyboard.
+    ///
+    /// Device enumeration is asynchronous — udev, then libinput, then the
+    /// compositor's own hotplug — and events sent before it finishes go
+    /// nowhere. `warm_up` is what keeps this off the critical path; it is the
+    /// backstop for the paths that reach a keyboard cold.
+    const SETTLE: Duration = Duration::from_millis(400);
+
+    // ioctl requests from <linux/uinput.h>. libc carries neither the _IO/_IOW
+    // macros nor these constants, so they are written out from the macro
+    // itself: _IOC(dir, type, nr, size) packs the four fields as
+    // (dir << 30) | (size << 16) | (type << 8) | nr, where a _IOW has dir 1,
+    // 'U' is uinput's type byte, and the sizes are the widths the header
+    // declares. `ioctl_numbers_match_the_kernel_header` pins them to the values
+    // that header produces.
+    const fn io(nr: libc::c_ulong) -> libc::c_ulong {
+        ((b'U' as libc::c_ulong) << 8) | nr
+    }
+    const fn iow(nr: libc::c_ulong, size: libc::c_ulong) -> libc::c_ulong {
+        (1 << 30) | (size << 16) | ((b'U' as libc::c_ulong) << 8) | nr
+    }
+
+    // There is no UI_DEV_DESTROY here: the keyboard lives as long as the
+    // process, and the kernel tears it down when the fd closes on exit.
+    const UI_DEV_CREATE: libc::c_ulong = io(1);
+    const UI_DEV_SETUP: libc::c_ulong = iow(3, size_of::<Setup>() as libc::c_ulong);
+    const UI_SET_EVBIT: libc::c_ulong = iow(100, 4);
+    const UI_SET_KEYBIT: libc::c_ulong = iow(101, 4);
+
+    // <linux/input-event-codes.h>. Only what this module can emit.
+    const EV_SYN: u16 = 0x00;
+    const EV_KEY: u16 = 0x01;
+    const EV_REP: u16 = 0x14;
+    const SYN_REPORT: u16 = 0;
+    const BUS_USB: u16 = 0x03;
+
+    const KEY_BACKSPACE: u16 = 14;
+    const KEY_TAB: u16 = 15;
+    const KEY_ENTER: u16 = 28;
+    const KEY_LEFTCTRL: u16 = 29;
+    const KEY_LEFTSHIFT: u16 = 42;
+
+    /// Every key that produces printable ASCII on a US layout, as
+    /// `(keycode, unshifted, shifted)`.
+    ///
+    /// The layout the compositor is actually running decides what these
+    /// keycodes mean; this table is what makes the *intent* of a character
+    /// expressible at all, and is why non-ASCII cannot go this way.
+    const ASCII_KEYS: &[(u16, char, char)] = &[
+        (2, '1', '!'),
+        (3, '2', '@'),
+        (4, '3', '#'),
+        (5, '4', '$'),
+        (6, '5', '%'),
+        (7, '6', '^'),
+        (8, '7', '&'),
+        (9, '8', '*'),
+        (10, '9', '('),
+        (11, '0', ')'),
+        (12, '-', '_'),
+        (13, '=', '+'),
+        (16, 'q', 'Q'),
+        (17, 'w', 'W'),
+        (18, 'e', 'E'),
+        (19, 'r', 'R'),
+        (20, 't', 'T'),
+        (21, 'y', 'Y'),
+        (22, 'u', 'U'),
+        (23, 'i', 'I'),
+        (24, 'o', 'O'),
+        (25, 'p', 'P'),
+        (26, '[', '{'),
+        (27, ']', '}'),
+        (30, 'a', 'A'),
+        (31, 's', 'S'),
+        (32, 'd', 'D'),
+        (33, 'f', 'F'),
+        (34, 'g', 'G'),
+        (35, 'h', 'H'),
+        (36, 'j', 'J'),
+        (37, 'k', 'K'),
+        (38, 'l', 'L'),
+        (39, ';', ':'),
+        (40, '\'', '"'),
+        (41, '`', '~'),
+        (43, '\\', '|'),
+        (44, 'z', 'Z'),
+        (45, 'x', 'X'),
+        (46, 'c', 'C'),
+        (47, 'v', 'V'),
+        (48, 'b', 'B'),
+        (49, 'n', 'N'),
+        (50, 'm', 'M'),
+        (51, ',', '<'),
+        (52, '.', '>'),
+        (53, '/', '?'),
+        (57, ' ', ' '),
+    ];
+
+    /// `struct uinput_setup`, which is `input_id` plus a fixed-width name.
+    #[repr(C)]
+    struct Setup {
+        id: libc::input_id,
+        name: [u8; 80],
+        ff_effects_max: u32,
+    }
+
+    struct Keyboard(File);
+
+    /// The virtual keyboard, created once and then held open.
+    ///
+    /// It has to outlive each injection: tearing the device down after every
+    /// transcript would turn each one into a hotplug, and anything sent while
+    /// the compositor was still enumerating it would be dropped on the floor.
+    static KEYBOARD: OnceLock<Mutex<Option<Keyboard>>> = OnceLock::new();
+
+    impl Keyboard {
+        fn create() -> Result<Self> {
+            let file = OpenOptions::new().write(true).open("/dev/uinput")?;
+            let kb = Self(file);
+            kb.ioctl(UI_SET_EVBIT, EV_KEY)?;
+            kb.ioctl(UI_SET_EVBIT, EV_SYN)?;
+            kb.ioctl(UI_SET_EVBIT, EV_REP)?;
+            // Declared up front because the kernel rejects keycodes that were
+            // never announced — a missing bit would only surface mid-transcript.
+            for code in ASCII_KEYS
+                .iter()
+                .map(|(code, _, _)| *code)
+                .chain([KEY_BACKSPACE, KEY_TAB, KEY_ENTER, KEY_LEFTCTRL, KEY_LEFTSHIFT])
+            {
+                kb.ioctl(UI_SET_KEYBIT, code as libc::c_ulong)?;
+            }
+
+            let mut setup = Setup {
+                id: libc::input_id {
+                    bustype: BUS_USB,
+                    vendor: 0x1d6b,
+                    product: 0x0001,
+                    version: 1,
+                },
+                name: [0; 80],
+                ff_effects_max: 0,
+            };
+            let name = b"orra virtual keyboard";
+            setup.name[..name.len()].copy_from_slice(name);
+            kb.ioctl_ptr(UI_DEV_SETUP, &setup)?;
+            kb.ioctl(UI_DEV_CREATE, 0u8)?;
+            std::thread::sleep(SETTLE);
+            Ok(kb)
+        }
+
+        /// The arg is spelled as whatever the request wants — a bit number, a
+        /// keycode, or nothing at all — and widened to the register width the
+        /// variadic call passes it in.
+        fn ioctl(&self, request: libc::c_ulong, arg: impl Into<libc::c_ulong>) -> Result<()> {
+            if unsafe { libc::ioctl(self.0.as_raw_fd(), request as _, arg.into()) } < 0 {
+                return Err(anyhow!("uinput ioctl {request:#x}: {}", std::io::Error::last_os_error()));
+            }
+            Ok(())
+        }
+
+        fn ioctl_ptr<T>(&self, request: libc::c_ulong, arg: &T) -> Result<()> {
+            if unsafe { libc::ioctl(self.0.as_raw_fd(), request as _, arg as *const T) } < 0 {
+                return Err(anyhow!("uinput ioctl {request:#x}: {}", std::io::Error::last_os_error()));
+            }
+            Ok(())
+        }
+
+        fn emit(&mut self, type_: u16, code: u16, value: i32) -> Result<()> {
+            let event = libc::input_event {
+                time: libc::timeval { tv_sec: 0, tv_usec: 0 },
+                type_,
+                code,
+                value,
+            };
+            let bytes = unsafe {
+                std::slice::from_raw_parts(&event as *const libc::input_event as *const u8, size_of::<libc::input_event>())
+            };
+            use std::io::Write;
+            self.0.write_all(bytes)?;
+            Ok(())
+        }
+
+        /// Terminate a packet. Events written without one are not acted on.
+        fn sync(&mut self) -> Result<()> {
+            self.emit(EV_SYN, SYN_REPORT, 0)
+        }
+
+        /// Press keys in order, hold, then release them in reverse.
+        fn chord(&mut self, held: &[u16], code: u16) -> Result<()> {
+            for key in held {
+                self.emit(EV_KEY, *key, 1)?;
+            }
+            self.emit(EV_KEY, code, 1)?;
+            self.sync()?;
+            std::thread::sleep(HOLD);
+            self.emit(EV_KEY, code, 0)?;
+            for key in held.iter().rev() {
+                self.emit(EV_KEY, *key, 0)?;
+            }
+            self.sync()?;
+            std::thread::sleep(GAP);
+            Ok(())
+        }
+
+        fn tap(&mut self, code: u16) -> Result<()> {
+            self.chord(&[], code)
+        }
+    }
+
+    /// Run `f` against the keyboard, creating it on first use.
+    fn with_keyboard<T>(f: impl FnOnce(&mut Keyboard) -> Result<T>) -> Result<T> {
+        let slot = KEYBOARD.get_or_init(|| Mutex::new(Keyboard::create().ok()));
+        // A panic while another thread held the lock must not cost the user
+        // every later transcript.
+        let mut guard = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let keyboard = guard
+            .as_mut()
+            .ok_or_else(|| anyhow!("no keyboard on /dev/uinput — the sandbox needs --device=all"))?;
+        f(keyboard)
+    }
+
+    /// Build the keyboard now rather than on the first transcript, if it is the
+    /// only thing on this machine that can type.
+    ///
+    /// Enumeration takes a moment — udev, then libinput, then the compositor —
+    /// and a transcript delivered during it would be typed into nothing. That
+    /// is a bad thing to discover on the first thing you say, so it is paid for
+    /// at startup instead. Machines that have wtype or xdotool never pay it,
+    /// and never get an extra keyboard in their device list.
+    pub fn warm_up_if_needed() {
+        if is_needed() {
+            let _ = with_keyboard(|_| Ok(()));
+        }
+    }
+
+    fn is_needed() -> bool {
+        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+        if wayland && (super::which("wtype") || super::which("ydotool")) {
+            return false;
+        }
+        !super::which("xdotool")
+    }
+
+    fn ascii_key(c: char) -> Option<(u16, bool)> {
+        ASCII_KEYS.iter().find_map(|(code, plain, shifted)| {
+            if c == *plain {
+                Some((*code, false))
+            } else if c == *shifted && shifted != plain {
+                Some((*code, true))
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Type text that the active layout can produce. Callers must have checked
+    /// `text.is_ascii()` — anything else has no keycode here.
+    pub fn type_ascii(text: &str) -> Result<()> {
+        with_keyboard(|kb| {
+            for c in text.chars() {
+                let (code, shift) = ascii_key(c)
+                    .ok_or_else(|| anyhow!("no key on this layout types {c:?}"))?;
+                let held: &[u16] = if shift { &[KEY_LEFTSHIFT] } else { &[] };
+                kb.chord(held, code)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Ctrl+V, or Ctrl+Shift+V for a terminal.
+    ///
+    /// The chord is the same physical key on every layout, which is what makes
+    /// clipboard paste the reliable mode in a sandbox.
+    pub fn paste(shift: bool) -> Result<()> {
+        let code = ascii_key('v').expect("v is in the table").0;
+        let held: &[u16] = if shift {
+            &[KEY_LEFTCTRL, KEY_LEFTSHIFT]
+        } else {
+            &[KEY_LEFTCTRL]
+        };
+        with_keyboard(|kb| kb.chord(held, code))
+    }
+
+    pub fn enter() -> Result<()> {
+        with_keyboard(|kb| kb.tap(KEY_ENTER))
+    }
+
+    pub fn backspace(n: usize) -> Result<()> {
+        with_keyboard(|kb| {
+            for _ in 0..n {
+                kb.tap(KEY_BACKSPACE)?;
+            }
+            Ok(())
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The ioctl numbers are derived by hand from the macro, so pin them to
+        /// what <linux/uinput.h> actually produces for this struct layout.
+        #[test]
+        fn ioctl_numbers_match_the_kernel_header() {
+            assert_eq!(UI_DEV_CREATE, 0x5501);
+            assert_eq!(UI_SET_EVBIT, 0x40045564);
+            assert_eq!(UI_SET_KEYBIT, 0x40045565);
+            assert_eq!(size_of::<Setup>(), 92);
+            assert_eq!(UI_DEV_SETUP, 0x405c5503);
+        }
+
+        /// Every printable ASCII character has to resolve to a key that
+        /// actually produces it.
+        #[test]
+        fn every_printable_ascii_character_has_a_key() {
+            for byte in 0x20u8..=0x7e {
+                let c = byte as char;
+                let (code, shift) = ascii_key(c).unwrap_or_else(|| panic!("{c:?} has no key"));
+                assert!(
+                    ASCII_KEYS.iter().any(|(k, plain, shifted)| {
+                        *k == code && if shift { *shifted == c } else { *plain == c }
+                    }),
+                    "{c:?} resolved to a key that does not produce it"
+                );
+            }
+        }
+
+        /// …and no two characters may share a keycode and shift state, or one
+        /// of them would silently type the other.
+        #[test]
+        fn no_two_characters_share_a_key() {
+            let mut seen: Vec<(u16, bool)> = Vec::new();
+            for (code, plain, shifted) in ASCII_KEYS {
+                let chars = if plain == shifted {
+                    vec![*plain]
+                } else {
+                    vec![*plain, *shifted]
+                };
+                for c in chars {
+                    let key = (*code, c != *plain);
+                    assert!(!seen.contains(&key), "{c:?} collides on {key:?}");
+                    seen.push(key);
+                }
+            }
+            assert_eq!(seen.len(), 0x7e - 0x20 + 1);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Windows
 // ---------------------------------------------------------------------------
 //
@@ -511,8 +900,11 @@ pub fn focused_class() -> String {
     #[cfg(target_os = "linux")]
     {
         if crate::config::is_hyprland() {
-            if let Ok(out) = run("hyprctl", &["activewindow", "-j"], None) {
-                if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out) {
+            // Asked over Hyprland's own socket rather than through this
+            // module's `run`, so it keeps working where hyprctl cannot be
+            // shipped — see `crate::hypr::ask`.
+            if let Ok(out) = crate::hypr::ask("j/activewindow") {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&out) {
                     if let Some(class) = v.get("class").and_then(|c| c.as_str()) {
                         if !class.is_empty() {
                             return class.to_string();
@@ -542,30 +934,69 @@ fn focused_is_terminal() -> bool {
     !class.is_empty() && TERMINALS.iter().any(|t| class.contains(t))
 }
 
+/// One way of asking the session to type something.
+#[cfg(target_os = "linux")]
+struct Attempt<'a> {
+    cmd: &'a str,
+    args: Vec<&'a str>,
+    stdin: Option<&'a [u8]>,
+}
+
+/// Run the first attempt that works, in the order given.
+///
+/// A tool that is not installed is skipped. A tool that runs and *fails* is
+/// remembered and the next one is tried, which is the part that makes this work
+/// on more than one kind of desktop: `wtype` is installed on plenty of GNOME
+/// and KDE machines and fails on every one of them, because those compositors
+/// never implemented the protocol it speaks. Treating "installed" as "will
+/// work" left those users with an app that transcribed and then typed nothing.
+///
+/// `None` means every tool was missing, and the caller should fall through to
+/// the kernel keyboard. `Some(Err(..))` means tools were there and every one of
+/// them refused — worth reporting rather than papering over, because that is
+/// the shape of a real permission problem rather than a missing package.
+#[cfg(target_os = "linux")]
+fn first_that_works(attempts: &[Attempt]) -> Option<Result<()>> {
+    let mut refused = None;
+    for attempt in attempts {
+        if !which(attempt.cmd) {
+            continue;
+        }
+        match run(attempt.cmd, &attempt.args, attempt.stdin) {
+            Ok(_) => return Some(Ok(())),
+            Err(e) => refused = Some(e),
+        }
+    }
+    refused.map(Err)
+}
+
 fn paste_keystroke() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let shift = focused_is_terminal();
-        if is_wayland() {
-            if which("wtype") {
-                let mut args = vec!["-M", "ctrl"];
-                if shift {
-                    args.extend(["-M", "shift"]);
-                }
-                args.extend(["-k", "v"]);
-                return run("wtype", &args, None).map(|_| ());
-            }
-            if which("ydotool") {
-                let keys = if shift { "42:1 29:1 47:1 47:0 29:0 42:0" } else { "29:1 47:1 47:0 29:0" };
-                return run("ydotool", &["key", keys], None).map(|_| ());
-            }
-            return Err(anyhow!("no key injection tool found (install wtype)"));
+        let mut wtype = vec!["-M", "ctrl"];
+        if shift {
+            wtype.extend(["-M", "shift"]);
         }
-        if which("xdotool") {
+        wtype.extend(["-k", "v"]);
+
+        let attempts = if is_wayland() {
+            let ydotool = if shift { "42:1 29:1 47:1 47:0 29:0 42:0" } else { "29:1 47:1 47:0 29:0" };
+            vec![
+                Attempt { cmd: "wtype", args: wtype, stdin: None },
+                Attempt { cmd: "ydotool", args: vec!["key", ydotool], stdin: None },
+            ]
+        } else {
             let combo = if shift { "ctrl+shift+v" } else { "ctrl+v" };
-            return run("xdotool", &["key", "--clearmodifiers", combo], None).map(|_| ());
+            vec![Attempt { cmd: "xdotool", args: vec!["key", "--clearmodifiers", combo], stdin: None }]
+        };
+        if let Some(outcome) = first_that_works(&attempts) {
+            return outcome;
         }
-        return Err(anyhow!("no key injection tool found (install xdotool)"));
+        // Nothing on PATH can type, which is exactly what a sandbox looks like:
+        // no host binaries at all. The kernel keyboard is the one thing that is
+        // always there, so it is the floor rather than an error.
+        return uinput::paste(shift);
     }
     #[cfg(target_os = "macos")]
     {
@@ -583,14 +1014,30 @@ fn paste_keystroke() -> Result<()> {
 fn type_text(text: &str) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        if is_wayland() && which("wtype") {
-            // `-` reads the text from stdin, so a long transcript cannot overflow argv.
-            return run("wtype", &["-d", "2", "-"], Some(text.as_bytes())).map(|_| ());
+        // `-` reads the text from stdin, so a long transcript cannot overflow argv.
+        let wtype = Attempt { cmd: "wtype", args: vec!["-d", "2", "-"], stdin: Some(text.as_bytes()) };
+        let xdotool = Attempt {
+            cmd: "xdotool",
+            args: vec!["type", "--clearmodifiers", "--", text],
+            stdin: None,
+        };
+        // xdotool is a candidate on Wayland too: it cannot reach a native
+        // Wayland window, but it can reach an X11 one under Xwayland.
+        let attempts: &[Attempt] = if is_wayland() { &[wtype, xdotool] } else { &[xdotool] };
+        if let Some(outcome) = first_that_works(attempts) {
+            return outcome;
         }
-        if which("xdotool") {
-            return run("xdotool", &["type", "--clearmodifiers", "--", text], None).map(|_| ());
+        // The kernel keyboard types through whatever layout is active, so it
+        // can only reach the characters that layout has keys for — wtype could
+        // do better because it uploads a keymap of its own. Anything past
+        // ASCII therefore goes the long way round: the text rides the
+        // clipboard and only the Ctrl+V is synthesized. The old clipboard is
+        // put back, because this is "type" mode and it promises to leave no
+        // trace on it.
+        if text.is_ascii() {
+            return uinput::type_ascii(text);
         }
-        return Err(anyhow!("no text injection tool found (install wtype)"));
+        return paste_text(text, true);
     }
     #[cfg(target_os = "windows")]
     {
@@ -604,17 +1051,37 @@ fn type_text(text: &str) -> Result<()> {
     Err(anyhow!("unsupported platform"))
 }
 
+/// How long to wait either side of the paste.
+///
+/// The second number is the one that shows. Putting the old clipboard back
+/// before the target application has read the selection replaces the
+/// transcript with whatever was there before, so the paste lands as stale text
+/// or as nothing at all — and which applications survive that is a matter of
+/// how quickly each reads the selection, which is exactly what "works in some
+/// apps but not others" looks like.
+///
+/// It is worse inside a sandbox, where each of these steps is another process
+/// to spawn through the sandbox machinery, so the margins are widened there.
+fn clipboard_settle() -> (Duration, Duration) {
+    if crate::config::flatpak_id().is_some() {
+        (Duration::from_millis(180), Duration::from_millis(900))
+    } else {
+        (Duration::from_millis(60), Duration::from_millis(220))
+    }
+}
+
 fn paste_text(text: &str, restore: bool) -> Result<()> {
     // Only read the old clipboard when it is going back: with restore off the
     // dictated text is meant to stay put, and reading it would be a clipboard
     // round trip nothing ever looks at.
+    let (before_paste, before_restore) = clipboard_settle();
     let previous = if restore { clipboard_get() } else { None };
     clipboard_set(text.as_bytes())?;
     // Give the clipboard owner a moment to claim the selection before pasting.
-    std::thread::sleep(Duration::from_millis(60));
+    std::thread::sleep(before_paste);
     paste_keystroke()?;
     // Let the target application read the clipboard before we put it back.
-    std::thread::sleep(Duration::from_millis(220));
+    std::thread::sleep(before_restore);
     if restore {
         if let Some(prev) = previous {
             let _ = clipboard_set(&prev);
@@ -626,12 +1093,13 @@ fn paste_text(text: &str, restore: bool) -> Result<()> {
 pub fn press_enter() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
-        if is_wayland() && which("wtype") {
-            return run("wtype", &["-k", "Return"], None).map(|_| ());
+        let wtype = Attempt { cmd: "wtype", args: vec!["-k", "Return"], stdin: None };
+        let xdotool = Attempt { cmd: "xdotool", args: vec!["key", "--clearmodifiers", "Return"], stdin: None };
+        let attempts: &[Attempt] = if is_wayland() { &[wtype, xdotool] } else { &[xdotool] };
+        if let Some(outcome) = first_that_works(attempts) {
+            return outcome;
         }
-        if which("xdotool") {
-            return run("xdotool", &["key", "--clearmodifiers", "Return"], None).map(|_| ());
-        }
+        return uinput::enter();
     }
     #[cfg(target_os = "macos")]
     {
@@ -652,19 +1120,23 @@ pub fn press_backspace(n: usize) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        if is_wayland() && which("wtype") {
-            let mut args: Vec<String> = Vec::new();
-            for _ in 0..n {
-                args.push("-k".into());
-                args.push("BackSpace".into());
-            }
-            let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            return run("wtype", &refs, None).map(|_| ());
+        let mut backspaces: Vec<&str> = Vec::new();
+        for _ in 0..n {
+            backspaces.push("-k");
+            backspaces.push("BackSpace");
         }
-        if which("xdotool") {
-            let spec = format!("BackSpace Repeat:{}", n);
-            return run("xdotool", &["key", "--clearmodifiers", &spec], None).map(|_| ());
+        let spec = format!("BackSpace Repeat:{n}");
+        let wtype = Attempt { cmd: "wtype", args: backspaces, stdin: None };
+        let xdotool = Attempt {
+            cmd: "xdotool",
+            args: vec!["key", "--clearmodifiers", &spec],
+            stdin: None,
+        };
+        let attempts: &[Attempt] = if is_wayland() { &[wtype, xdotool] } else { &[xdotool] };
+        if let Some(outcome) = first_that_works(attempts) {
+            return outcome;
         }
+        return uinput::backspace(n);
     }
     #[cfg(target_os = "macos")]
     {
@@ -676,6 +1148,12 @@ pub fn press_backspace(n: usize) -> Result<()> {
     }
     #[allow(unreachable_code)]
     Err(anyhow!("no way to send Backspace on this platform"))
+}
+
+/// Get the injection path ready before the first transcript needs it.
+pub fn warm_up() {
+    #[cfg(target_os = "linux")]
+    uinput::warm_up_if_needed();
 }
 
 /// Deliver the transcript. Blocking — call from a worker thread.
@@ -694,6 +1172,43 @@ pub fn deliver(text: &str, cfg: &Config) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of the ladder: a tool that is installed but useless must
+    /// not stop the ones below it from being tried. `true` and `false` stand in
+    /// for a working tool and a refusing one, so this exercises the real spawn
+    /// path rather than a mock of it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_missing_tool_is_skipped_and_a_working_one_after_it_is_used() {
+        let missing = || Attempt { cmd: "orra-no-such-tool", args: vec![], stdin: None };
+        let works = || Attempt { cmd: "true", args: vec![], stdin: None };
+
+        assert!(matches!(first_that_works(&[missing(), works()]), Some(Ok(()))));
+        assert!(matches!(first_that_works(&[works(), missing()]), Some(Ok(()))));
+    }
+
+    /// A tool that refuses is reported only once nothing else can take over —
+    /// that is a real error worth showing, unlike "not installed", which is
+    /// just the sandbox and is handled by falling through to uinput.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refusing_tool_is_reported_only_when_nothing_else_is_left() {
+        let refuses = || Attempt { cmd: "false", args: vec![], stdin: None };
+        let works = || Attempt { cmd: "true", args: vec![], stdin: None };
+
+        assert!(matches!(first_that_works(&[refuses()]), Some(Err(_))));
+        assert!(matches!(first_that_works(&[refuses(), works()]), Some(Ok(()))));
+    }
+
+    /// Nothing installed at all is `None`, which is what tells the callers to
+    /// reach for the kernel keyboard instead of giving up.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn nothing_installed_leaves_it_to_the_caller() {
+        let missing = || Attempt { cmd: "orra-no-such-tool", args: vec![], stdin: None };
+        assert!(first_that_works(&[missing()]).is_none());
+        assert!(first_that_works(&[]).is_none());
+    }
 
     #[test]
     fn terminal_classes_match_loosely() {

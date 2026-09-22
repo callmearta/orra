@@ -106,11 +106,60 @@ The deb, rpm and AUR package declare `wtype` and `wl-clipboard` as dependencies,
 so your package manager pulls them in; on an AppImage, install them yourself. On
 an X11 session you want `xdotool` instead of `wtype`.
 
-There is deliberately **no Flatpak**. The sandbox blocks the
-`zwp_virtual_keyboard` protocol that `wtype` uses and the data-control protocol
-`wl-clipboard` uses, so a Flatpak build could transcribe but never type —
-the one thing the app is for. The deb, rpm, AppImage and AUR packages run
-unsandboxed and do the whole job.
+**Any Linux, sandboxed — Flatpak**
+
+```bash
+flatpak install --user --bundle orra.flatpak
+```
+
+Download `orra.flatpak` from the [releases
+page](https://github.com/callmearta/orra/releases) first — or just open it, and
+your desktop will offer to install it.
+
+The Flatpak is built from the same binaries as the other packages, and types a
+different way. Everything else is the same app.
+
+A sandbox is a hostile place for a dictation app, and the interesting part of
+this package is why it still works. Flatpak stamps its Wayland connection with
+a *security context*, and compositors hide their privileged protocols from any
+client carrying one:
+
+```
+zwp_virtual_keyboard_manager_v1      ← wtype's entire mechanism
+zwlr_data_control_manager_v1
+hyprland_global_shortcuts_manager_v1
+```
+
+On Hyprland and every other wlroots compositor those are withheld, and Mutter
+and KWin never implemented the first one at all. So no binary shipped inside
+the sandbox could type with them — bundling `wtype` buys nothing anywhere.
+
+What does work is `/dev/uinput`: Orra asks the **kernel** for a keyboard, and
+the compositor picks it up through libinput exactly as it would real hardware.
+That is not a protocol client, so no compositor filters it, and it behaves
+identically on GNOME, KDE, Hyprland and wlroots. It is why the Flatpak asks for
+`--device=all`, which is the broadest permission here and the one thing that
+makes typing possible at all.
+
+The clipboard is untouched by any of this: `wl-copy` works inside the sandbox,
+so the default **Paste it in** mode — put the transcript on the clipboard,
+synthesize Ctrl+V — is the reliable one, and it handles any language, where a
+synthetic keyboard can only type what the active layout has keys for.
+
+Two consequences worth knowing:
+
+- **The tray icon is missing.** `libayatana-appindicator` is not part of the
+  runtime. It is loaded at runtime rather than linked, so the app starts and
+  works normally and simply has no tray; quit from the settings window instead.
+- **Hold-to-talk goes through one extra process.** The compositor bind runs
+  `flatpak run --command=orra-ctl`, which costs about 60ms before recording
+  starts — not enough to clip a word, but if you want it exact, `Type it out`
+  and Toggle mode are both unaffected.
+
+On Hyprland the Flatpak writes its binds and its overlay rule into
+`~/.config/hypr/config` exactly as the other packages do, which is what the
+`--filesystem=xdg-config/hypr` in the manifest is for. Delete the managed block
+and it is gone.
 
 ### From source
 

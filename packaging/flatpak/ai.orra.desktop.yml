@@ -1,0 +1,139 @@
+# Orra as a Flatpak.
+#
+# Built from the binaries the release workflow already produced, not from
+# source. flatpak-builder wants sources rather than a lockfile, so a source
+# build means vendoring the whole cargo and npm trees into the manifest — and
+# for a Flatpak that would otherwise be assembled from the very same commit as
+# the deb, the rpm and the AppImage, that is a second build system to keep in
+# step for no gain.
+#
+# Two things about this app are unusual in a sandbox, and both are below:
+# how it types, and why it needs the compositor's own config.
+
+app-id: ai.orra.desktop
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+command: orra
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  # orra-ctl reaches the app on 127.0.0.1, and the microphone comes in over
+  # ALSA's pulse plugin, which needs the sound socket.
+  - --share=network
+  - --socket=pulseaudio
+
+  # /dev/uinput, and the whole reason this Flatpak can type at all.
+  #
+  # A Flatpak's Wayland connection is stamped with a security context, and
+  # compositors hide their privileged protocols from clients carrying one:
+  # zwp_virtual_keyboard_manager_v1 — wtype's entire mechanism — is among them
+  # on Hyprland and on wlroots, and was never implemented at all on Mutter and
+  # KWin. So no tool that speaks a protocol can work here, whichever binary is
+  # shipped. A keyboard registered with the *kernel* is not a protocol client;
+  # the compositor picks it up through libinput exactly as it would real
+  # hardware, which is why this works on every compositor and in every sandbox.
+  - --device=all
+
+  # The bind that starts dictation, and the window rule that holds the overlay
+  # above the dock without letting it take focus, are written into Hyprland's
+  # own Lua config. The rule is not cosmetic: without no_focus the overlay
+  # steals focus from the window the transcript is about to be pasted into.
+  - --filesystem=xdg-config/hypr
+  # …and Hyprland is asked to reload and to report its active window over its
+  # own IPC socket, because hyprctl links libhyprutils, libhyprwire, libre2 and
+  # libreadline, none of which a Flatpak runtime has.
+  - --filesystem=xdg-run/hypr
+  # Launch at login, written as an autostart entry where the session will find
+  # it.
+  - --filesystem=xdg-config/autostart
+
+  - --talk-name=org.freedesktop.Notifications
+  # The tray, and only this much is needed for it. Registering a StatusNotifier
+  # item is a call to the watcher; appindicator then exposes the item and its
+  # menu on its *own* connection, named by unique bus name rather than by a
+  # well-known one. So neither an own-name nor com.canonical.dbusmenu is
+  # wanted here — verified by building it both ways and reading the item back
+  # off the watcher (Status "Active", Menu path exported).
+  - --talk-name=org.kde.StatusNotifierWatcher
+
+modules:
+  # The clipboard half of injection: the app puts the transcript on the
+  # selection and synthesizes Ctrl+V, which keeps arbitrary Unicode working
+  # even though a synthetic keyboard can only type what the layout has keys
+  # for. wl-copy talks wl_data_device, which Flatpak does allow through.
+  - name: wl-clipboard
+    buildsystem: meson
+    config-opts:
+      # The two binaries are all that is wanted; the shell completions are for
+      # a terminal the sandbox has not got. These are "no" rather than
+      # "disabled" because they are directory options, not features.
+      - -Dzshcompletiondir=no
+      - -Dfishcompletiondir=no
+    sources:
+      - type: archive
+        url: https://github.com/bugaevc/wl-clipboard/archive/refs/tags/v2.3.0.tar.gz
+        sha256: b4dc560973f0cd74e02f817ffa2fd44ba645a4f1ea94b7b9614dacc9f895f402
+
+  # The tray. The app builds a TrayIcon unconditionally, and
+  # libayatana-appindicator is dlopen'd rather than linked — so a runtime
+  # without it does not fail to start, it just quietly has no tray icon, which
+  # is a difference from the deb/rpm/AppImage builds that is easy to miss.
+  # Three libraries, because appindicator sits on top of the other two.
+  - name: tray
+    buildsystem: simple
+    build-commands:
+      - sh tray.sh
+    sources:
+      # Kept as one script for all three rather than three manifest modules, so
+      # that the local build and CI run the same commands instead of two
+      # descriptions of the same thing that can drift apart.
+      - type: file
+        path: tray.sh
+      # libdbusmenu's configure.ac calls IT_PROG_INTLTOOL, and the SDK has no
+      # intltool — it is long deprecated, which is why it is not there. Only
+      # its m4 macros and helper scripts are wanted.
+      - type: archive
+        url: https://launchpad.net/intltool/trunk/0.51.0/+download/intltool-0.51.0.tar.gz
+        sha256: 67c74d94196b153b774ab9f89b2fa6c6ba79352407037c8c14d5aeb334e959cd
+      - type: archive
+        url: https://deb.debian.org/debian/pool/main/libd/libdbusmenu/libdbusmenu_18.10.20180917~bzr492+repack1.orig.tar.xz
+        sha256: 41298b926573419f21864205317461750b833c596af6ab0bd206e13336f8cee3
+      - type: archive
+        url: https://deb.debian.org/debian/pool/main/liba/libayatana-indicator/libayatana-indicator_0.9.4.orig.tar.gz
+        sha256: 7f7ce3189357b02f54408e8224685cb10219ea4f557e840f67f83e0509acef3c
+      - type: archive
+        url: https://deb.debian.org/debian/pool/main/liba/libayatana-appindicator/libayatana-appindicator_0.6.0.orig.tar.gz
+        sha256: cfd6e066febab3ddf21c7c68e6ce6bf0b7429a21cae2ee0fa04ee91643784fe5
+
+  - name: orra
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 orra /app/bin/orra
+      # The compositor binds call this one by absolute path, so it has to sit
+      # beside the app rather than anywhere on PATH.
+      - install -Dm755 orra-ctl /app/bin/orra-ctl
+      # Flatpak only exports a desktop file named after the app id, and the
+      # icon has to carry that name too or the shell shows a blank square.
+      - install -Dm644 orra.desktop /app/share/applications/ai.orra.desktop.desktop
+      - for size in 32x32 64x64 128x128 256x256; do
+          install -Dm644 "$size.png" "/app/share/icons/hicolor/$size/apps/ai.orra.desktop.png";
+        done
+    sources:
+      # build.sh builds these and stages them here; the release workflow does
+      # the same before handing the manifest to flatpak-builder.
+      - type: file
+        path: stage/orra
+      - type: file
+        path: stage/orra-ctl
+      - type: file
+        path: orra.desktop
+      - type: file
+        path: stage/32x32.png
+      - type: file
+        path: stage/64x64.png
+      - type: file
+        path: stage/128x128.png
+      - type: file
+        path: stage/256x256.png
