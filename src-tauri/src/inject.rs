@@ -50,7 +50,16 @@ fn is_wayland() -> bool {
 fn run(cmd: &str, args: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>> {
     let mut command = if crate::config::flatpak_id().is_some() {
         let mut spawned = Command::new("flatpak-spawn");
-        spawned.arg("--host").arg(cmd);
+        // `setsid`, and it is not decoration. `wl-copy` does not hold the
+        // selection itself — it leaves a process behind to do it, and that
+        // process is what an application reads when it pastes. Anything
+        // `flatpak-spawn` starts is killed when the command it ran returns, so
+        // the process holding the selection died the moment the copy
+        // "succeeded": the clipboard was correct for a moment and then reverted
+        // to whatever was there before, which is why the text sometimes arrived
+        // and mostly did not. A new session is out of that reach, so the
+        // selection outlives the call that set it.
+        spawned.arg("--host").arg("setsid").arg(cmd);
         spawned
     } else {
         Command::new(cmd)
@@ -1059,6 +1068,11 @@ fn paste_keystroke() -> Result<()> {
 fn type_text(text: &str) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
+        // The machine's wtype types anything, so unlike a synthetic keyboard
+        // this needs no clipboard detour for non-ASCII.
+        if crate::config::flatpak_id().is_some() {
+            return host_type(text);
+        }
         // `-` reads the text from stdin, so a long transcript cannot overflow argv.
         let wtype = Attempt { cmd: "wtype", args: vec!["-d", "2", "-"], stdin: Some(text.as_bytes()) };
         let xdotool = Attempt {
@@ -1116,6 +1130,12 @@ fn clipboard_settle() -> (Duration, Duration) {
 }
 
 fn paste_text(text: &str, restore: bool) -> Result<()> {
+    // In a sandbox the whole paste goes to the machine in one piece, because
+    // every step of it is a spawn and the windows between them are where the
+    // wrong clipboard gets pasted. See `HOST_INJECT_SCRIPT`.
+    if crate::config::flatpak_id().is_some() {
+        return host_paste(text, restore);
+    }
     // Only read the old clipboard when it is going back: with restore off the
     // dictated text is meant to stay put, and reading it would be a clipboard
     // round trip nothing ever looks at.
@@ -1138,6 +1158,10 @@ fn paste_text(text: &str, restore: bool) -> Result<()> {
 pub fn press_enter() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
+        if crate::config::flatpak_id().is_some() {
+            let helper = crate::config::config_dir().join(HOST_INJECT);
+            return run(&helper.display().to_string(), &["enter"], None).map(|_| ());
+        }
         let wtype = Attempt { cmd: "wtype", args: vec!["-k", "Return"], stdin: None };
         let xdotool = Attempt { cmd: "xdotool", args: vec!["key", "--clearmodifiers", "Return"], stdin: None };
         let attempts: &[Attempt] = if is_wayland() { &[wtype, xdotool] } else { &[xdotool] };
@@ -1165,6 +1189,11 @@ pub fn press_backspace(n: usize) -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
+        if crate::config::flatpak_id().is_some() {
+            let helper = crate::config::config_dir().join(HOST_INJECT);
+            let count = n.to_string();
+            return run(&helper.display().to_string(), &["backspace", &count], None).map(|_| ());
+        }
         let mut backspaces: Vec<&str> = Vec::new();
         for _ in 0..n {
             backspaces.push("-k");
@@ -1198,7 +1227,142 @@ pub fn press_backspace(n: usize) -> Result<()> {
 /// Get the injection path ready before the first transcript needs it.
 pub fn warm_up() {
     #[cfg(target_os = "linux")]
-    uinput::warm_up_if_needed();
+    {
+        uinput::warm_up_if_needed();
+        if crate::config::flatpak_id().is_some() {
+            let _ = write_host_helper();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// the host-side injector
+// ---------------------------------------------------------------------------
+//
+// Inside a Flatpak every step of a paste is a separate `flatpak-spawn`, and
+// that is what made it unreliable rather than merely slow.
+//
+// `wl-copy` does not hold the selection itself: it leaves a process behind to
+// do it, and an application pastes whatever that process is offering at the
+// moment it reads. Between the copy and the keystroke there is a window where
+// the *previous* clipboard is still the one on offer — paste inside it and the
+// wrong text is typed, which is exactly what "it pasted an old clipboard entry"
+// is. The same window opens at the other end: put the old clipboard back too
+// soon and a slow application reads that instead.
+//
+// Both are timing, and timing across a D-Bus round trip is not something to
+// guess at with a sleep. So the whole sequence happens in one process on the
+// machine, and it waits for the selection to actually be the transcript before
+// sending the keystroke.
+
+/// The injector written for the host to run.
+const HOST_INJECT: &str = "orra-inject";
+
+/// Where the transcript is put for the helper to read.
+///
+/// A file rather than stdin: it is one less thing to get wrong across the
+/// spawn, and it is already in a directory the host can see.
+fn pending_path() -> std::path::PathBuf {
+    crate::config::config_dir().join("orra-pending")
+}
+
+fn write_host_helper() -> Result<()> {
+    let path = crate::config::config_dir().join(HOST_INJECT);
+    std::fs::write(&path, HOST_INJECT_SCRIPT)
+        .map_err(|e| anyhow!("writing {}: {e}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms)?;
+    }
+    Ok(())
+}
+
+/// Written to the app's config directory, where the host can run it.
+const HOST_INJECT_SCRIPT: &str = r#"#!/bin/bash
+# Written by Orra. Runs on the machine, not in the sandbox.
+#
+#   paste <file> <shift> <restore>   put the file on the clipboard, paste it, maybe put the old one back
+#   type <file>                      type the file out
+#   enter                            press Return
+#   backspace <n>                    press Backspace n times
+#
+# The waiting here is not padding. wl-copy hands the selection to a process it
+# leaves behind, and until that lands the clipboard still holds what it held
+# before — pasting in that gap types the previous contents. So this waits for
+# the selection to actually be the text, rather than sleeping and hoping.
+set -u
+
+wait_for_selection() {
+  want="$1"
+  for _ in $(seq 1 60); do
+    [ "$(wl-paste --no-newline 2>/dev/null || true)" = "$want" ] && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
+case "${1:-}" in
+  paste)
+    file="$2"; shift_key="$3"; restore="$4"
+    want="$(cat "$file")"
+    previous=""
+    [ "$restore" = 1 ] && previous="$(wl-paste --no-newline 2>/dev/null || true)"
+
+    printf '%s' "$want" | setsid wl-copy
+    wait_for_selection "$want" || exit 1
+
+    if [ "$shift_key" = 1 ]; then
+      wtype -M ctrl -M shift -k v
+    else
+      wtype -M ctrl -k v
+    fi
+
+    # Long enough for an application to have read the selection, short enough
+    # not to be felt. Restoring before that is the other half of the same bug.
+    sleep 0.5
+    if [ "$restore" = 1 ] && [ -n "$previous" ]; then
+      printf '%s' "$previous" | setsid wl-copy
+    fi
+    rm -f "$file"
+    ;;
+  type)
+    wtype -d 2 - < "$2"
+    rm -f "$2"
+    ;;
+  enter)
+    wtype -k Return
+    ;;
+  backspace)
+    i=0
+    while [ "$i" -lt "${2:-1}" ]; do wtype -k BackSpace; i=$((i + 1)); done
+    ;;
+esac
+"#;
+
+/// Hand the paste to the machine, whole.
+fn host_paste(text: &str, restore: bool) -> Result<()> {
+    let file = pending_path();
+    std::fs::write(&file, text)?;
+    let helper = crate::config::config_dir().join(HOST_INJECT);
+    let shift = if focused_is_terminal() { "1" } else { "0" };
+    let restore = if restore { "1" } else { "0" };
+    run(
+        &helper.display().to_string(),
+        &["paste", &file.display().to_string(), shift, restore],
+        None,
+    )
+    .map(|_| ())
+}
+
+/// Type the text out on the machine.
+fn host_type(text: &str) -> Result<()> {
+    let file = pending_path();
+    std::fs::write(&file, text)?;
+    let helper = crate::config::config_dir().join(HOST_INJECT);
+    run(&helper.display().to_string(), &["type", &file.display().to_string()], None).map(|_| ())
 }
 
 /// Deliver the transcript. Blocking — call from a worker thread.
