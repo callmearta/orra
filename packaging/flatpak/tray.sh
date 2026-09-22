@@ -19,6 +19,15 @@ J="$(nproc)"
 # left us.
 ROOT="$PWD"
 
+# The three libraries and intltool arrive as plain tar files, so unpack them
+# here rather than leaving it to flatpak-builder: it strips an archive's leading
+# directory when it unpacks, which for four archives in one module means pouring
+# them all into the same place. Each of these unpacks to a directory of its own.
+for archive in "$ROOT"/*.tar.gz "$ROOT"/*.tar.xz; do
+  [ -f "$archive" ] || continue
+  tar -xf "$archive" -C "$ROOT"
+done
+
 # libdbusmenu's configure.ac calls IT_PROG_INTLTOOL, and the SDK has no
 # intltool — it is long deprecated, which is why it is not there. Only its m4
 # macros and helper scripts are wanted, and only for the translation rules in a

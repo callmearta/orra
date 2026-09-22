@@ -248,6 +248,17 @@ jobs:
       # The Flatpak packages the binaries the step above just produced, so it
       # runs here rather than as a job of its own — a second runner would build
       # the same commit from scratch to arrive at the same two files.
+      # A Flatpak build wants the GNOME SDK installed beside a build tree, and
+      # a runner arrives with several gigabytes of toolchains the job never
+      # touches. Taking them out first is the difference between a build and a
+      # "no space left on device" partway through one.
+      - name: Free disk space
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
+          df -h / | tail -1
+
       - name: Install flatpak-builder
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -268,10 +279,18 @@ jobs:
           status=${PIPESTATUS[0]}
           if [ "$status" -ne 0 ]; then
             # Reading a job log from outside needs a token; reading an
-            # annotation does not. A failed step that only says "exit code 1"
-            # is a step nobody can debug without one, so the reason is put
-            # somewhere it can actually be seen.
-            tail -n 25 /tmp/flatpak.log | sed 's/^/::error::/'
+            # annotation does not. It goes in as ONE annotation rather than one
+            # per line, because GitHub keeps only a handful of the latter and
+            # drops the ones at the end — which is where the error is.
+            {
+              echo "--- disk ---"
+              df -h / | tail -1
+              echo "--- lines that look like a failure ---"
+              grep -iE "error|fail|no such|not found|denied|no space|cannot" /tmp/flatpak.log | tail -12
+              echo "--- last 30 lines ---"
+              tail -n 30 /tmp/flatpak.log
+            } | tail -c 3500 | sed ':a;N;$!ba;s/\n/%0A/g' > /tmp/why
+            echo "::error::$(cat /tmp/why)"
           fi
           exit "$status"
 

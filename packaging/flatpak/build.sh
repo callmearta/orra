@@ -50,6 +50,31 @@ for size in 32x32 64x64 128x128 256x256; do
   install -m644 "$root/src-tauri/icons/$size.png" "$stage/$size.png"
 done
 
+# The tray stack's sources are fetched here rather than declared as archive
+# sources in the manifest, because flatpak-builder unpacks an archive's leading
+# directory away and the flag that turns that off is not in every version of it.
+# Handing it plain files and letting tray.sh unpack them keeps each project in
+# its own directory on any version.
+echo "fetching the tray sources"
+fetch() {
+  url="$1" name="$2" hash="$3"
+  if [ ! -f "$stage/$name" ]; then
+    curl -fsSL -o "$stage/$name" "$url"
+  fi
+  echo "$hash  $stage/$name" | sha256sum -c --quiet - || {
+    echo "checksum mismatch for $name" >&2
+    exit 1
+  }
+}
+fetch https://launchpad.net/intltool/trunk/0.51.0/+download/intltool-0.51.0.tar.gz \
+  intltool.tar.gz 67c74d94196b153b774ab9f89b2fa6c6ba79352407037c8c14d5aeb334e959cd
+fetch "https://deb.debian.org/debian/pool/main/libd/libdbusmenu/libdbusmenu_18.10.20180917~bzr492+repack1.orig.tar.xz" \
+  libdbusmenu.tar.xz 41298b926573419f21864205317461750b833c596af6ab0bd206e13336f8cee3
+fetch https://deb.debian.org/debian/pool/main/liba/libayatana-indicator/libayatana-indicator_0.9.4.orig.tar.gz \
+  libayatana-indicator.tar.gz 7f7ce3189357b02f54408e8224685cb10219ea4f557e840f67f83e0509acef3c
+fetch https://deb.debian.org/debian/pool/main/liba/libayatana-appindicator/libayatana-appindicator_0.6.0.orig.tar.gz \
+  libayatana-appindicator.tar.gz cfd6e066febab3ddf21c7c68e6ce6bf0b7429a21cae2ee0fa04ee91643784fe5
+
 # A runtime has to be somewhere flatpak-builder can see it, and which
 # installation that is decides whether `--user` belongs on the command line.
 # Building against the system one needs no root and no download when it is
