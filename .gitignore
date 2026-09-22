@@ -36,3 +36,4 @@ Thumbs.db
 /packaging/flatpak/repo/
 /packaging/flatpak/stage/
 *.flatpak
+/.flatpak-builder/

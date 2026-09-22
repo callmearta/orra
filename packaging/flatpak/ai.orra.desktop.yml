@@ -94,16 +94,24 @@ modules:
       # libdbusmenu's configure.ac calls IT_PROG_INTLTOOL, and the SDK has no
       # intltool — it is long deprecated, which is why it is not there. Only
       # its m4 macros and helper scripts are wanted.
+      # flatpak-builder strips an archive's leading directory by default, which
+      # for four archives in one module means unpacking them on top of each
+      # other — libdbusmenu's configure.ac alongside intltool's m4 file. The
+      # script wants each in its own directory, as it would be by hand.
       - type: archive
+        strip-components: 0
         url: https://launchpad.net/intltool/trunk/0.51.0/+download/intltool-0.51.0.tar.gz
         sha256: 67c74d94196b153b774ab9f89b2fa6c6ba79352407037c8c14d5aeb334e959cd
       - type: archive
+        strip-components: 0
         url: https://deb.debian.org/debian/pool/main/libd/libdbusmenu/libdbusmenu_18.10.20180917~bzr492+repack1.orig.tar.xz
         sha256: 41298b926573419f21864205317461750b833c596af6ab0bd206e13336f8cee3
       - type: archive
+        strip-components: 0
         url: https://deb.debian.org/debian/pool/main/liba/libayatana-indicator/libayatana-indicator_0.9.4.orig.tar.gz
         sha256: 7f7ce3189357b02f54408e8224685cb10219ea4f557e840f67f83e0509acef3c
       - type: archive
+        strip-components: 0
         url: https://deb.debian.org/debian/pool/main/liba/libayatana-appindicator/libayatana-appindicator_0.6.0.orig.tar.gz
         sha256: cfd6e066febab3ddf21c7c68e6ce6bf0b7429a21cae2ee0fa04ee91643784fe5
 

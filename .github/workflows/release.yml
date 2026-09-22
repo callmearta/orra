@@ -262,7 +262,18 @@ jobs:
 
       - name: Build the Flatpak
         if: matrix.platform == 'ubuntu-22.04'
-        run: ./packaging/flatpak/build.sh --no-build --repo
+        run: |
+          set +e
+          ./packaging/flatpak/build.sh --no-build --repo 2>&1 | tee /tmp/flatpak.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -ne 0 ]; then
+            # Reading a job log from outside needs a token; reading an
+            # annotation does not. A failed step that only says "exit code 1"
+            # is a step nobody can debug without one, so the reason is put
+            # somewhere it can actually be seen.
+            tail -n 25 /tmp/flatpak.log | sed 's/^/::error::/'
+          fi
+          exit "$status"
 
       # Published beside the deb, the rpm and the AppImage, because a Flatpak
       # is only useful to someone who has the file.
