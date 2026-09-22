@@ -116,13 +116,12 @@ Download `orra.flatpak` from the [releases
 page](https://github.com/callmearta/orra/releases) first — or just open it, and
 your desktop will offer to install it.
 
-The Flatpak is built from the same binaries as the other packages, and types a
-different way. Everything else is the same app.
+The Flatpak is built from the same binaries as the other packages, and types
+with the same tools. A sandbox is a hostile place for a dictation app, and the
+interesting part of this package is what it had to do about that.
 
-A sandbox is a hostile place for a dictation app, and the interesting part of
-this package is why it still works. Flatpak stamps its Wayland connection with
-a *security context*, and compositors hide their privileged protocols from any
-client carrying one:
+Flatpak stamps its Wayland connection with a *security context*, and compositors
+hide their privileged protocols from any client carrying one:
 
 ```
 zwp_virtual_keyboard_manager_v1      ← wtype's entire mechanism
@@ -131,32 +130,36 @@ hyprland_global_shortcuts_manager_v1
 ```
 
 On Hyprland and every other wlroots compositor those are withheld, and Mutter
-and KWin never implemented the first one at all. So no binary shipped inside
-the sandbox could type with them — bundling `wtype` buys nothing anywhere.
+and KWin never implemented the first one at all. So a `wtype` bundled inside the
+sandbox types nothing on any compositor — the sandbox is the reason, and no
+amount of shipping the binary gets around it.
 
-What does work is `/dev/uinput`: Orra asks the **kernel** for a keyboard, and
-the compositor picks it up through libinput exactly as it would real hardware.
-That is not a protocol client, so no compositor filters it, and it behaves
-identically on GNOME, KDE, Hyprland and wlroots. It is why the Flatpak asks for
-`--device=all`, which is the broadest permission here and the one thing that
-makes typing possible at all.
+Orra therefore asks the machine to run its typing tools, through
+`flatpak-spawn --host`, rather than reimplementing typing inside the sandbox.
+`wtype`, `wl-copy` and `xdotool` are the user's own — installed by them, or by
+the deb — and running them is what makes the Flatpak type the same way the
+unsandboxed build does, with the same tool and the same behaviour. It is why
+this package asks for `--talk-name=org.freedesktop.Flatpak`, the one permission
+here that is a way out of the sandbox.
 
-The clipboard is untouched by any of this: `wl-copy` works inside the sandbox,
-so the default **Paste it in** mode — put the transcript on the clipboard,
-synthesize Ctrl+V — is the reliable one, and it handles any language, where a
-synthetic keyboard can only type what the active layout has keys for.
+If the machine has no `wtype` at all, the app falls back to a keyboard it
+registers with the **kernel** through `/dev/uinput` — which no compositor
+filters, because it is not a protocol client — and that is what `--device=all`
+is for. On a machine with the usual tools it is never used.
 
-The tray needs one thing the runtime does not carry: `libayatana-appindicator`
-and the two libraries under it. The app loads it at runtime rather than linking
-it, so a runtime without it costs the tray icon silently — which is why the
-package builds the tray stack rather than relying on what is already there.
+The clipboard is the same idea: `wl-copy` runs on the host too, so **Paste it
+in** — put the transcript on the clipboard, synthesize Ctrl+V — is the reliable
+mode, and it handles any language, where a synthetic keyboard can only type what
+the active layout has keys for.
 
-One consequence worth knowing:
-
-- **Hold-to-talk goes through one extra process.** The compositor bind runs
-  `flatpak run --command=orra-ctl`, which costs about 60ms before recording
-  starts — not enough to clip a word, but if you want it exact, `Type it out`
-  and Toggle mode are both unaffected.
+Two smaller things the runtime does not carry. The tray's
+`libayatana-appindicator` and the two libraries under it are built into the
+package, because the app loads it at runtime rather than linking it and a
+runtime without it loses the tray icon silently. And the compositor bind does
+not run the app's client binary — that is inside the sandbox — but a few lines
+of shell written into the app's own config directory, which the host can see and
+run: opening a container on every keypress is slow enough to clip the first word
+of a hold, and visible while it happens.
 
 On Hyprland the Flatpak writes its binds and its overlay rule into
 `~/.config/hypr/config` exactly as the other packages do, which is what the

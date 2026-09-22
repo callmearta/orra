@@ -49,6 +49,18 @@ finish-args:
   # it.
   - --filesystem=xdg-config/autostart
 
+  # Run the machine's own typing tools rather than the sandbox's idea of them.
+  #
+  # This is the one permission here that is a way out of the sandbox: with it
+  # the app can ask the host to run a command, which is what wtype, wl-copy and
+  # xdotool are — the user's, installed by them or by the deb, not the
+  # runtime's. The alternative is a second implementation of typing inside the
+  # sandbox, and this app's whole job is to type into other windows; a version
+  # of that which is subtly different from the unsandboxed one is worse than
+  # not having one. Every one of these calls goes through `run`, so the app
+  # types with the same tool, in the same way, as the deb does.
+  - --talk-name=org.freedesktop.Flatpak
+
   - --talk-name=org.freedesktop.Notifications
   # The tray, and only this much is needed for it. Registering a StatusNotifier
   # item is a call to the watcher; appindicator then exposes the item and its

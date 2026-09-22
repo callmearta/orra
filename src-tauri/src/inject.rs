@@ -38,9 +38,24 @@ fn is_wayland() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
+/// Run one of the typing tools, on the host when there is a sandbox in the way.
+///
+/// Inside a Flatpak the tools that do this work are not in the runtime — wtype,
+/// ydotool, xdotool, wl-copy are the machine's, installed by the user or by the
+/// deb. Running them through `flatpak-spawn --host` means the app types exactly
+/// the way the unsandboxed build does, with the same tool and the same
+/// behaviour, instead of a second implementation of the same idea that can be
+/// subtly worse. It is one extra process per injection, not per keystroke.
 #[cfg(not(target_os = "windows"))]
 fn run(cmd: &str, args: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>> {
-    let mut child = Command::new(cmd)
+    let mut command = if crate::config::flatpak_id().is_some() {
+        let mut spawned = Command::new("flatpak-spawn");
+        spawned.arg("--host").arg(cmd);
+        spawned
+    } else {
+        Command::new(cmd)
+    };
+    let mut child = command
         .args(args)
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
@@ -72,11 +87,41 @@ fn run(cmd: &str, args: &[&str], stdin: Option<&[u8]>) -> Result<Vec<u8>> {
 
 #[cfg(not(target_os = "windows"))]
 fn which(cmd: &str) -> bool {
+    if crate::config::flatpak_id().is_some() {
+        return host_has(cmd);
+    }
     // `Command::new` on a missing binary surfaces as NotFound, so probing the
     // usual directories avoids spawning a shell just to ask.
     std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).any(|d| d.join(cmd).is_file()))
         .unwrap_or(false)
+}
+
+/// Whether the *machine* has a command, asked once and remembered.
+///
+/// Inside a sandbox the app's own PATH says nothing about what the host has —
+/// the tools are all out there and none of them are in here — and the answer is
+/// wanted on the way to every keystroke. So it is asked once, in a single call
+/// that checks all of them, and the answer is kept.
+#[cfg(target_os = "linux")]
+fn host_has(cmd: &str) -> bool {
+    use std::sync::OnceLock;
+    static HOST_TOOLS: OnceLock<Vec<String>> = OnceLock::new();
+
+    let tools = HOST_TOOLS.get_or_init(|| {
+        let probe = "for t in wtype ydotool xdotool wl-copy wl-paste xclip; do command -v \"$t\"; done";
+        Command::new("flatpak-spawn")
+            .args(["--host", "sh", "-c", probe])
+            .output()
+            .map(|out| {
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter_map(|line| line.rsplit('/').next().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    tools.iter().any(|t| t == cmd)
 }
 
 // ---------------------------------------------------------------------------

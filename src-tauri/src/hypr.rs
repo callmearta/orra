@@ -32,26 +32,54 @@ pub fn ctl_path() -> PathBuf {
 
 /// The command a bind runs, ready for the arguments to be appended.
 ///
-/// Inside a Flatpak this cannot be a path. The bind is executed by Hyprland on
-/// the *host*, where `/app/bin/orra-ctl` does not exist, so it goes back
-/// through `flatpak run` — which re-enters the sandbox and finds the binary
-/// beside the app, reading the sandbox's own config for the port and token.
-/// A `flatpak run` costs about 60ms, which is paid once on the press and once
-/// on the release: not enough to clip the first word, and far less than the
-/// alternative of holding a second copy of the binary on the host, which would
-/// have to be built against the host's libc to be runnable there.
+/// Inside a Flatpak this is the helper written below, not the app's own
+/// client: the bind is executed by the compositor on the *host*, where
+/// `/app/bin/orra-ctl` does not exist, and pointing it at
+/// `flatpak run --command=orra-ctl` instead costs a container spawn on every
+/// keypress — slow enough to clip the first word of a hold, and visible while
+/// it happens.
 pub fn ctl_invocation() -> String {
     match config::flatpak_id() {
-        Some(id) => flatpak_invocation(&id),
+        Some(_) => config::config_dir().join(HOTKEY_HELPER).display().to_string(),
         None => ctl_path().display().to_string(),
     }
 }
 
-/// Split from the environment lookup so the one string the bind depends on can
-/// be checked without a sandbox to run in — this is what a compositor will
-/// execute on every keypress, and it cannot be tested by hand from here.
-fn flatpak_invocation(app_id: &str) -> String {
-    format!("flatpak run --command=orra-ctl {app_id}")
+/// The name of the push-to-talk client written for the host to run.
+const HOTKEY_HELPER: &str = "orra-hotkey";
+
+/// Write the client the compositor will run, and make it runnable.
+///
+/// A handful of shell, because starting it must cost nothing: it opens the
+/// control port, sends the command it was given, and exits. It lives in the
+/// app's own config directory, which the host can already see and execute —
+/// `~/.var/app/<id>/config/orra` — so no extra permission is needed to place it
+/// and none to run it.
+fn write_hotkey_helper(cfg: &Config) -> Result<()> {
+    let path = config::config_dir().join(HOTKEY_HELPER);
+    // The token is hex and the port is a number, so both go in as they are.
+    let script = format!(
+        "#!/bin/bash\n\
+         # Written by Orra. The compositor runs this with one argument: the\n\
+         # command to send. It is shell rather than the app's own client\n\
+         # because that client is inside the sandbox, and starting one of\n\
+         # those per keypress is both slow and visible.\n\
+         exec 3<>/dev/tcp/127.0.0.1/{port} || exit 1\n\
+         printf '%s %s\\n' '{token}' \"$1\" >&3\n",
+        port = cfg.port,
+        token = cfg.token,
+    );
+    std::fs::write(&path, script)
+        .with_context(|| format!("writing {}", path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms)?;
+    }
+    Ok(())
 }
 
 /// Quote a value for a Lua string literal.
@@ -198,6 +226,11 @@ pub fn apply(cfg: &Config) -> Result<String> {
     // Before anything is written, not after: a compositor that cannot be
     // reached must not leave the user's config half-applied.
     reachable()?;
+
+    // The binds point at this, so it has to exist before they are written.
+    if config::flatpak_id().is_some() {
+        write_hotkey_helper(cfg)?;
+    }
 
     write_block(&keybinds_path(), &keybind_block(cfg))?;
     if cfg.hud {
@@ -349,15 +382,14 @@ mod tests {
     use super::*;
     use crate::config::Provider;
 
-    /// What a sandboxed install writes into the bind. It has to name the
-    /// subcommand and the app id, because the host has no `orra-ctl` to call
-    /// and no other way to reach the one inside the sandbox.
+    /// The helper written for the host has to be somewhere the host can both
+    /// see and run, which is the app's own config directory next to the config
+    /// that names the port and token it connects to.
     #[test]
-    fn a_sandboxed_bind_re_enters_the_flatpak() {
-        assert_eq!(
-            flatpak_invocation("ai.orra.desktop"),
-            "flatpak run --command=orra-ctl ai.orra.desktop"
-        );
+    fn the_host_helper_is_written_beside_the_config() {
+        let path = config::config_dir().join(HOTKEY_HELPER);
+        assert!(path.starts_with(config::config_dir()));
+        assert!(path.to_string_lossy().ends_with("orra-hotkey"));
     }
 
     /// The socket path is the whole contract with Hyprland: get it wrong and
