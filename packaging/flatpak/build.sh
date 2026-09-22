@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 #
-# Build Orra as a Flatpak, and optionally publish the result as a repository
-# other machines can install from.
+# Build Orra as a Flatpak: a single-file bundle, plus the repository behind it.
 #
-#     ./build.sh                 # build and install it for this user
-#     ./build.sh --repo          # build, and export a repo + .flatpakref to publish
+#     ./build.sh                     # build and install it for this user
+#     ./build.sh --repo              # also write ai.orra.desktop.flatpak to publish
 #     ./build.sh --no-build --repo   # package binaries that already exist (CI)
 #
 # Run from anywhere; it works on the directory it lives in. Unlike the AUR

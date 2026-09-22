@@ -146,11 +146,13 @@ so the default **Paste it in** mode — put the transcript on the clipboard,
 synthesize Ctrl+V — is the reliable one, and it handles any language, where a
 synthetic keyboard can only type what the active layout has keys for.
 
-Two consequences worth knowing:
+The tray needs one thing the runtime does not carry: `libayatana-appindicator`
+and the two libraries under it. The app loads it at runtime rather than linking
+it, so a runtime without it costs the tray icon silently — which is why the
+package builds the tray stack rather than relying on what is already there.
 
-- **The tray icon is missing.** `libayatana-appindicator` is not part of the
-  runtime. It is loaded at runtime rather than linked, so the app starts and
-  works normally and simply has no tray; quit from the settings window instead.
+One consequence worth knowing:
+
 - **Hold-to-talk goes through one extra process.** The compositor bind runs
   `flatpak run --command=orra-ctl`, which costs about 60ms before recording
   starts — not enough to clip a word, but if you want it exact, `Type it out`
