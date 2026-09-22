@@ -262,7 +262,10 @@ jobs:
       - name: Install flatpak-builder
         if: matrix.platform == 'ubuntu-22.04'
         run: |
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder
+          # elfutils for eu-strip: flatpak-builder strips the binaries it
+          # builds with it, and a runner has no elfutils, so the first module
+          # dies with "Failed to execute child process eu-strip".
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder elfutils
           # A runner starts with neither installation populated, so the
           # runtimes go into the user one — which is what tells build.sh to
           # pass --user, since it otherwise prefers a system install that is
